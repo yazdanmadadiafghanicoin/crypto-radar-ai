@@ -1,0 +1,247 @@
+
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#101827">
+<title>Crypto Radar AI</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0b1120;color:#e5edf8;font:15px Tahoma,Arial,sans-serif}
+header{padding:22px 16px;background:#111c30;border-bottom:1px solid #29364d}
+main{max-width:1100px;margin:auto;padding:16px}
+h1{font-size:23px;margin:0 0 8px}
+h2{font-size:18px}
+.muted{color:#9aabc3;font-size:13px;line-height:1.8}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:16px 0}
+.panel,.stat{background:#111c30;border:1px solid #29364d;border-radius:14px;padding:14px}
+.stat strong{display:block;font-size:20px;margin-top:8px;overflow-wrap:anywhere}
+.controls{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
+button,select{background:#1b2a42;color:#fff;border:1px solid #3b4e6c;padding:11px 14px;border-radius:9px;font:inherit}
+button{cursor:pointer}
+button:disabled{opacity:.5}
+.primary{background:#176a52;border-color:#238d6d}
+.danger{background:#8a303e}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.card{background:#111c30;border:1px solid #29364d;border-radius:14px;padding:15px;min-width:0}
+.cardtop{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.symbol{font-size:17px;font-weight:bold}
+.pill{padding:5px 9px;border-radius:8px;font-size:12px;font-weight:bold;background:#334155}
+.buy,.long{color:#62e6ac;background:#123b30}
+.sell,.short{color:#ff9b9b;background:#48242e}
+.wait{color:#f5d78c;background:#493d20}
+.price{font-size:22px;font-weight:bold;margin:15px 0;overflow-wrap:anywhere}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:13px;line-height:1.9}
+.metrics span{color:#9aabc3}
+.card button{margin-top:13px;width:100%}
+.section{margin-top:22px}
+.tablewrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
+th,td{text-align:right;padding:12px 9px;border-bottom:1px solid #29364d}
+th{color:#9aabc3}
+.notice{padding:12px;border-radius:10px;background:#17243a;color:#b8c9e3;line-height:1.9;font-size:13px}
+#status{margin:12px 0;line-height:1.8}
+.good{color:#62e6ac}
+.bad{color:#ff9b9b}
+small{color:#9aabc3}
+@media(max-width:520px){.stats{grid-template-columns:1fr 1fr}.stats .stat:last-child{grid-column:1/-1}main{padding:11px}header{padding:18px 12px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>📡 Crypto Radar AI</h1>
+  <div class="muted">اسکنر بازار کریپتو · تحلیل ۱۵ دقیقه · معاملات مجازی</div>
+</header>
+
+<main>
+  <div class="notice">
+    نسخه آزمایشی: این ربات بر اساس EMA20، EMA50 و RSI سیگنال می‌دهد.
+    سیگنال تضمین سود نیست. هیچ سفارش واقعی ارسال نمی‌شود.
+  </div>
+
+  <div class="stats">
+    <div class="stat"><span class="muted">ارزهای بررسی‌شده</span><strong id="count">۰</strong></div>
+    <div class="stat"><span class="muted">سیگنال‌های فعال</span><strong id="active">۰</strong></div>
+    <div class="stat"><span class="muted">معاملات مجازی باز</span><strong id="openCount">۰</strong></div>
+  </div>
+
+  <div class="controls">
+    <select id="market">
+      <option value="all">اسپات و فیوچرز</option>
+      <option value="spot">فقط اسپات</option>
+      <option value="futures">فقط فیوچرز</option>
+    </select>
+    <button class="primary" id="scanBtn" onclick="scan()">🔄 اسکن بازار</button>
+  </div>
+  <div id="status" class="muted">برای دریافت آخرین داده‌ها، اسکن بازار را بزن.</div>
+  <div id="cards" class="cards"></div>
+
+  <section class="section panel">
+    <h2>📒 معاملات مجازی</h2>
+    <p class="muted">موجودی آزمایشی: ۱۰۰۰ USDT. این موجودی واقعی نیست و فقط در همین مرورگر ذخیره می‌شود.</p>
+    <div class="controls">
+      <button onclick="resetPaper()">بازنشانی حساب مجازی</button>
+    </div>
+    <div id="paperSummary" class="muted"></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>ارز</th><th>بازار</th><th>جهت</th><th>ورود</th><th>قیمت فعلی</th><th>سود/زیان مجازی</th><th>عملیات</th></tr></thead>
+        <tbody id="paperRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="notice">
+      نکته: اطلاعات فیوچرز از بازار قراردادهای دائمی USDT بایننس می‌آید.
+      کارمزد، فاندینگ، لغزش قیمت و لیکوییدشدن در شبیه‌سازی فعلی محاسبه نمی‌شود؛
+      پس نتیجه مجازی با نتیجه واقعی متفاوت است.
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const money = n => Number(n).toLocaleString("en-US",{maximumFractionDigits:4});
+const pct = n => (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
+let latest = [];
+let scanning = false;
+
+function readPaper(){
+  try {
+    return JSON.parse(localStorage.getItem("cra_paper_v1")) ||
+      {cash:1000,positions:[],history:[]};
+  } catch {
+    return {cash:1000,positions:[],history:[]};
+  }
+}
+function savePaper(p){localStorage.setItem("cra_paper_v1",JSON.stringify(p))}
+function currentPrice(symbol,market){
+  const item=latest.find(x=>x.symbol===symbol&&x.market===market);
+  return item ? item.price : null;
+}
+function fmtMarket(m){return m==="spot"?"اسپات":"فیوچرز"}
+function fmtSignal(s){
+  return ({BUY:"خرید",SELL:"نزولی / عدم خرید",LONG:"لانگ",SHORT:"شورت",WAIT:"انتظار"})[s]||s;
+}
+function signalClass(s){return ["BUY","LONG"].includes(s)?"buy":s==="SHORT"?"short":s==="SELL"?"sell":"wait"}
+
+function renderCards(){
+  const market=$("market").value;
+  const list=latest.filter(x=>market==="all"||x.market===market);
+  $("count").textContent=list.length;
+  $("active").textContent=list.filter(x=>x.signal!=="WAIT"&&x.signal!=="SELL").length;
+  $("cards").innerHTML=list.map(x=>{
+    const canOpen=x.signal==="BUY"||x.signal==="LONG"||x.signal==="SHORT";
+    return `<article class="card">
+      <div class="cardtop"><span class="symbol">${x.symbol.replace("USDT","")}/USDT</span>
+      <span class="pill">${fmtMarket(x.market)}</span></div>
+      <div class="price">$${money(x.price)}</div>
+      <div class="cardtop"><span class="pill ${signalClass(x.signal)}">${fmtSignal(x.signal)}</span>
+      <small>۱۵ دقیقه</small></div>
+      <div class="metrics">
+        <div><span>EMA20</span><br>${money(x.ema20)}</div>
+        <div><span>EMA50</span><br>${money(x.ema50)}</div>
+        <div><span>RSI</span><br>${Number(x.rsi).toFixed(2)}</div>
+        <div><span>بازار</span><br>${fmtMarket(x.market)}</div>
+      </div>
+      <p class="muted">${x.reason}</p>
+      ${canOpen?`<button class="primary" onclick="openPaper('${x.symbol}','${x.market}','${x.signal}')">ثبت معامله مجازی</button>`:""}
+    </article>`;
+  }).join("");
+  renderPaper();
+}
+
+async function scan(){
+  if(scanning)return;
+  scanning=true;
+  $("scanBtn").disabled=true;
+  $("status").textContent="در حال دریافت داده‌های بازار…";
+  try{
+    const r=await fetch("/api/scan",{cache:"no-store"});
+    const j=await r.json();
+    if(!r.ok||!j.ok)throw new Error(j.error||"دریافت داده‌ها ناموفق بود");
+    latest=j.data;
+    renderCards();
+    $("status").innerHTML='<span class="good">اسکن موفق بود.</span> آخرین بررسی: '+new Date(j.updatedAt).toLocaleString("fa-IR");
+  }catch(e){
+    $("status").innerHTML='<span class="bad">'+e.message+'</span> — چند لحظه بعد دوباره امتحان کن.';
+  }finally{
+    scanning=false;
+    $("scanBtn").disabled=false;
+  }
+}
+
+function openPaper(symbol,market,signal){
+  const price=currentPrice(symbol,market);
+  if(!price)return alert("ابتدا بازار را اسکن کن.");
+  const p=readPaper();
+  if(p.positions.some(x=>x.symbol===symbol&&x.market===market)){
+    return alert("برای این ارز در این بازار یک معامله مجازی باز داری.");
+  }
+  const margin=100;
+  const leverage=market==="futures"?2:1;
+  const stake=market==="spot"?margin:margin*leverage;
+  if(p.cash<margin)return alert("موجودی مجازی کافی نیست.");
+  const side=signal==="SHORT"?"SHORT":"LONG";
+  p.cash-=margin;
+  p.positions.push({
+    id:Date.now()+Math.random(),
+    symbol,market,side,entry:price,margin,stake,leverage,
+    openedAt:new Date().toISOString()
+  });
+  savePaper(p);
+  renderPaper();
+  alert("معامله مجازی ثبت شد؛ هیچ سفارش واقعی ارسال نشده است.");
+}
+
+function positionPnl(pos,price){
+  if(!price)return 0;
+  const direction=pos.side==="SHORT"?-1:1;
+  return pos.margin*pos.leverage*direction*(price-pos.entry)/pos.entry;
+}
+function renderPaper(){
+  const p=readPaper();
+  $("openCount").textContent=p.positions.length;
+  const rows=p.positions.map(pos=>{
+    const price=currentPrice(pos.symbol,pos.market)||pos.entry;
+    const pnl=positionPnl(pos,price);
+    return `<tr>
+      <td>${pos.symbol}</td><td>${fmtMarket(pos.market)}</td>
+      <td>${pos.side==="SHORT"?"شورت":"لانگ"}</td>
+      <td>$${money(pos.entry)}</td><td>$${money(price)}</td>
+      <td class="${pnl>=0?"good":"bad"}">$${money(pnl)}</td>
+      <td><button class="danger" onclick="closePaper('${pos.id}')">بستن</button></td>
+    </tr>`;
+  }).join("");
+  $("paperRows").innerHTML=rows||'<tr><td colspan="7">هنوز معامله مجازی باز نیست.</td></tr>';
+  const floating=p.positions.reduce((sum,pos)=>sum+positionPnl(pos,currentPrice(pos.symbol,pos.market)||pos.entry),0);
+  const realized=p.history.reduce((sum,h)=>sum+h.pnl,0);
+  $("paperSummary").innerHTML=
+    `نقد مجازی: <b>$${money(p.cash)}</b> · سود/زیان باز: <b class="${floating>=0?"good":"bad"}">$${money(floating)}</b> · سود/زیان معاملات بسته‌شده: <b>$${money(realized)}</b>`;
+}
+function closePaper(id){
+  const p=readPaper();
+  const index=p.positions.findIndex(x=>String(x.id)===String(id));
+  if(index<0)return;
+  const pos=p.positions[index];
+  const price=currentPrice(pos.symbol,pos.market)||pos.entry;
+  const pnl=positionPnl(pos,price);
+  p.cash+=pos.margin+pnl;
+  p.history.push({symbol:pos.symbol,market:pos.market,pnl,closedAt:new Date().toISOString()});
+  p.positions.splice(index,1);
+  savePaper(p);
+  renderPaper();
+}
+function resetPaper(){
+  if(!confirm("تمام معاملات و نتایج مجازی پاک و حساب به ۱۰۰۰ USDT بازنشانی شود؟"))return;
+  savePaper({cash:1000,positions:[],history:[]});
+  renderPaper();
+}
+$("market").addEventListener("change",renderCards);
+scan();
+setInterval(scan,60000);
+</script>
+</body>
+</html>
