@@ -1,0 +1,35 @@
+
+name: Crypto Radar AI Paper Trading
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "2,17,32,47 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crypto-radar-paper
+  cancel-in-progress: false
+
+jobs:
+  run-paper-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Execute Paper Trading Bot
+        env:
+          BOT_URL: ${{ secrets.BOT_URL }}
+          BOT_SECRET: ${{ secrets.BOT_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "$BOT_URL"
+          test -n "$BOT_SECRET"
+          curl --fail-with-body \
+            --show-error \
+            --silent \
+            --retry 2 \
+            --max-time 45 \
+            -X POST \
+            -H "Authorization: Bearer $BOT_SECRET" \
+            "$BOT_URL/api/tick"
