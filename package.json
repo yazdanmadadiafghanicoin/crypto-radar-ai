@@ -1,13 +1,13 @@
 
 {
   "name": "crypto-radar-ai",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Crypto market scanner and paper trading dashboard",
+  "type": "module",
   "engines": {
-    "node": "22.x"
+    "node": ">=20"
   },
-  "scripts": {
-    "start": "node -e \"console.log('Use Vercel dev for local development')\""
+  "dependencies": {
+    "pg": "^8.13.1"
   }
 }
