@@ -1,0 +1,283 @@
+
+import pg from "pg";
+
+const { Pool } = pg;
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+  max: 2
+});
+
+const SYMBOL = "BTCUSDT";
+const INTERVAL = "15m";
+const LEVERAGE = 2;
+const RISK = 0.01;
+const INITIAL_BALANCE = 1000;
+const FEE_RATE = 0.0005; // کارمزد فرضی هر طرف
+
+export async function setup() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS radar_account (
+      id INTEGER PRIMARY KEY,
+      balance DOUBLE PRECISION NOT NULL,
+      last_candle BIGINT NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS radar_trades (
+      id BIGSERIAL PRIMARY KEY,
+      symbol TEXT NOT NULL,
+      side TEXT NOT NULL,
+      entry DOUBLE PRECISION NOT NULL,
+      quantity DOUBLE PRECISION NOT NULL,
+      stop_loss DOUBLE PRECISION NOT NULL,
+      take_profit DOUBLE PRECISION NOT NULL,
+      leverage INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      pnl DOUBLE PRECISION DEFAULT 0,
+      opened_at TIMESTAMPTZ DEFAULT NOW(),
+      closed_at TIMESTAMPTZ
+    );
+
+    INSERT INTO radar_account (id, balance)
+    VALUES (1, ${INITIAL_BALANCE})
+    ON CONFLICT (id) DO NOTHING;
+  `);
+}
+
+async function candles() {
+  const url =
+    "https://fapi.binance.com/fapi/v1/klines" +
+    `?symbol=${SYMBOL}&interval=${INTERVAL}&limit=120`;
+
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(12000)
+  });
+
+  if (!response.ok) {
+    throw new Error("Binance market data unavailable");
+  }
+
+  const data = await response.json();
+
+  // آخرین کندل ممکن است هنوز بسته نشده باشد
+  return data.slice(0, -1).map(c => ({
+    time: Number(c[0]),
+    high: Number(c[2]),
+    low: Number(c[3]),
+    close: Number(c[4])
+  }));
+}
+
+function ema(values, period) {
+  let value =
+    values.slice(0, period).reduce((a, b) => a + b, 0)
+    / period;
+
+  const k = 2 / (period + 1);
+
+  for (const price of values.slice(period)) {
+    value = price * k + value * (1 - k);
+  }
+
+  return value;
+}
+
+function rsi(values, period = 14) {
+  let gain = 0;
+  let loss = 0;
+
+  for (let i = 1; i <= period; i++) {
+    const diff = values[i] - values[i - 1];
+    gain += Math.max(diff, 0);
+    loss += Math.max(-diff, 0);
+  }
+
+  gain /= period;
+  loss /= period;
+
+  for (let i = period + 1; i < values.length; i++) {
+    const diff = values[i] - values[i - 1];
+    gain = (gain * (period - 1) + Math.max(diff, 0)) / period;
+    loss = (loss * (period - 1) + Math.max(-diff, 0)) / period;
+  }
+
+  if (gain === 0 && loss === 0) return 50;
+  if (loss === 0) return 100;
+
+  return 100 - 100 / (1 + gain / loss);
+}
+
+export async function runBot() {
+  await setup();
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const accountResult = await client.query(
+      "SELECT * FROM radar_account WHERE id=1 FOR UPDATE"
+    );
+
+    const account = accountResult.rows[0];
+    const history = await candles();
+    const last = history.at(-1);
+
+    if (!last || history.length < 60) {
+      throw new Error("Insufficient candle data");
+    }
+
+    if (Number(account.last_candle) === last.time) {
+      await client.query("COMMIT");
+      return { ok: true, message: "Already processed" };
+    }
+
+    const closes = history.map(c => c.close);
+    const price = last.close;
+    const ema20 = ema(closes, 20);
+    const ema50 = ema(closes, 50);
+    const rsi14 = rsi(closes);
+
+    const openResult = await client.query(
+      "SELECT * FROM radar_trades WHERE status='OPEN' ORDER BY id LIMIT 1"
+    );
+
+    const trade = openResult.rows[0];
+    let action = "HOLD";
+
+    if (trade) {
+      const entry = Number(trade.entry);
+      const quantity = Number(trade.quantity);
+      const sl = Number(trade.stop_loss);
+      const tp = Number(trade.take_profit);
+      const isLong = trade.side === "LONG";
+
+      // فرض محافظه‌کارانه: اگر هر دو سطح در یک کندل
+      // لمس شوند، حد ضرر اول اجرا شده است.
+      const hitSL = isLong
+        ? last.low <= sl
+        : last.high >= sl;
+
+      const hitTP = isLong
+        ? last.high >= tp
+        : last.low <= tp;
+
+      if (hitSL || hitTP) {
+        const exit = hitSL ? sl : tp;
+        const direction = isLong ? 1 : -1;
+        const gross = (exit - entry) * quantity * direction;
+        const fees = (entry + exit) * quantity * FEE_RATE;
+        const pnl = gross - fees;
+
+        await client.query(
+          `UPDATE radar_trades
+           SET status='CLOSED', pnl=$1, closed_at=NOW()
+           WHERE id=$2`,
+          [pnl, trade.id]
+        );
+
+        await client.query(
+          "UPDATE radar_account SET balance=balance+$1 WHERE id=1",
+          [pnl]
+        );
+
+        action = hitSL ? "STOP_LOSS" : "TAKE_PROFIT";
+      }
+    } else {
+      let side = null;
+
+      if (ema20 > ema50 && rsi14 > 52 && rsi14 < 70) {
+        side = "LONG";
+      } else if (
+        ema20 < ema50 &&
+        rsi14 < 48 &&
+        rsi14 > 30
+      ) {
+        side = "SHORT";
+      }
+
+      if (side && account.balance > 0) {
+        const slDistance = price * 0.01;
+        const maxLoss = account.balance * RISK;
+
+        // حجم بر اساس ریسک، اهرم و کارمزد فرضی
+        const qtyByRisk =
+          maxLoss / (slDistance + price * FEE_RATE * 2);
+
+        const qtyByMargin =
+          (account.balance * LEVERAGE) / price;
+
+        const quantity = Math.min(qtyByRisk, qtyByMargin);
+
+        const stopLoss = side === "LONG"
+          ? price - slDistance
+          : price + slDistance;
+
+        const takeProfit = side === "LONG"
+          ? price + slDistance * 2
+          : price - slDistance * 2;
+
+        await client.query(
+          `INSERT INTO radar_trades
+           (symbol, side, entry, quantity,
+            stop_loss, take_profit, leverage)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            SYMBOL, side, price, quantity,
+            stopLoss, takeProfit, LEVERAGE
+          ]
+        );
+
+        action = `OPEN_${side}`;
+      }
+    }
+
+    await client.query(
+      "UPDATE radar_account SET last_candle=$1 WHERE id=1",
+      [last.time]
+    );
+
+    await client.query("COMMIT");
+
+    return {
+      ok: true,
+      mode: "PAPER",
+      symbol: SYMBOL,
+      leverage: LEVERAGE,
+      risk_percent: 1,
+      price,
+      ema20,
+      ema50,
+      rsi14,
+      action
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getStatus() {
+  await setup();
+
+  const account = await pool.query(
+    "SELECT * FROM radar_account WHERE id=1"
+  );
+
+  const trades = await pool.query(
+    "SELECT * FROM radar_trades ORDER BY id DESC LIMIT 30"
+  );
+
+  return {
+    ok: true,
+    app: "Crypto Radar AI",
+    mode: "PAPER",
+    leverage: LEVERAGE,
+    risk_percent: 1,
+    account: account.rows[0],
+    trades: trades.rows
+  };
+}
