@@ -3,17 +3,20 @@ const SYMBOLS = ["BTC", "ETH", "BNB", "SOL", "XRP", "DOGE"];
 
 function ema(values, period) {
   if (values.length < period) return null;
+
   let result = values.slice(0, period).reduce((a, b) => a + b, 0) / period;
   const multiplier = 2 / (period + 1);
 
   for (let i = period; i < values.length; i++) {
     result = values[i] * multiplier + result * (1 - multiplier);
   }
+
   return result;
 }
 
 function rsi(values, period = 14) {
   if (values.length <= period) return null;
+
   let gain = 0;
   let loss = 0;
 
@@ -28,8 +31,8 @@ function rsi(values, period = 14) {
 
   for (let i = period + 1; i < values.length; i++) {
     const change = values[i] - values[i - 1];
-    avgGain = (avgGain * (period - 1) + Math.max(change, 0)) / period;
-    avgLoss = (avgLoss * (period - 1) + Math.max(-change, 0)) / period;
+    avgGain = (avgGain * 13 + Math.max(change, 0)) / 14;
+    avgLoss = (avgLoss * 13 + Math.max(-change, 0)) / 14;
   }
 
   if (avgLoss === 0) return avgGain === 0 ? 50 : 100;
@@ -59,7 +62,7 @@ function analyze(rows, symbol) {
 
   return {
     symbol: symbol + "USDT",
-    market: "binance_usdm_futures",
+    market: "binance_spot",
     price,
     ema20,
     ema50,
@@ -72,21 +75,23 @@ function analyze(rows, symbol) {
 
 async function fetchJson(url) {
   const response = await fetch(url, {
-    headers: { Accept: "application/json" }
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(12000)
   });
 
   if (!response.ok) throw new Error("HTTP " + response.status);
   return response.json();
 }
 
-async function getFutures(symbol) {
+async function getSpot(symbol) {
   const url =
-    "https://fapi.binance.com/fapi/v1/klines" +
+    "https://api.binance.com/api/v3/klines" +
     "?symbol=" + symbol + "USDT&interval=15m&limit=100";
 
   const rows = await fetchJson(url);
+
   if (!Array.isArray(rows) || !rows.length) {
-    throw new Error("داده Binance Futures موجود نیست");
+    throw new Error("داده Binance Spot موجود نیست");
   }
 
   return rows.map(c => ({
@@ -100,18 +105,20 @@ export default async function handler(req, res) {
 
   if (req.method !== "GET") {
     res.setHeader("Allow", "GET");
-    return res.status(405).json({ ok: false, error: "فقط GET مجاز است" });
+    return res.status(405).json({
+      ok: false,
+      error: "فقط GET مجاز است"
+    });
   }
 
   const results = await Promise.all(
     SYMBOLS.map(async symbol => {
       try {
-        const candles = await getFutures(symbol);
-        return analyze(candles, symbol);
+        return analyze(await getSpot(symbol), symbol);
       } catch (error) {
         return {
           symbol: symbol + "USDT",
-          market: "binance_usdm_futures",
+          market: "binance_spot",
           signal: "ERROR",
           reason: error.message
         };
@@ -124,7 +131,7 @@ export default async function handler(req, res) {
   return res.status(200).json({
     ok: errors.length < results.length,
     app: "Crypto Radar AI",
-    market: "Binance USD-M Futures",
+    market: "Binance Spot",
     timeframe: "15m",
     mode: "PAPER_TRADING",
     updatedAt: new Date().toISOString(),
