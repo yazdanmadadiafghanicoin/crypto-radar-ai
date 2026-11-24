@@ -8,31 +8,67 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL
     ? { rejectUnauthorized: false }
     : undefined,
-  max: 2
+  max: 3
 });
 
-// Binance USD-M Futures - PAPER TRADING ONLY
-const BASE_URL = "https://fapi.binance.com";
-const INTERVAL = "15m";
+// PAPER TRADING ONLY — OKX public market data
+const BASE_URL = "https://www.okx.com";
+const EXCHANGE_NAME = "OKX USDT Perpetual Swaps";
+
 const INITIAL_BALANCE = 1000;
 const RISK = 0.01;
 const FEE_RATE = 0.0005;
+
 const MAX_OPEN_TRADES = 5;
 const MAX_POSITION_PERCENT = 0.18;
 const STOP_PERCENT = 0.05;
 const TARGET_MULTIPLIER = 2;
-const BATCH_SIZE = 20;
 
-async function binance(path) {
+const BATCH_SIZE = 8;
+const MIN_BALANCE = 1;
+const INTERVAL = "15m";
+
+async function marketData(path) {
   const response = await fetch(BASE_URL + path, {
-    signal: AbortSignal.timeout(15000)
+    signal: AbortSignal.timeout(12000),
+    headers: {
+      Accept: "application/json"
+    }
   });
 
   if (!response.ok) {
-    throw new Error("Binance HTTP " + response.status);
+    throw new Error("OKX HTTP " + response.status);
   }
 
-  return response.json();
+  const body = await response.json();
+
+  if (body.code !== "0") {
+    throw new Error(
+      "OKX API " + body.code + ": " + (body.msg || "Unknown error")
+    );
+  }
+
+  return body.data;
+}
+
+function toSymbol(instId) {
+  return String(instId)
+    .replaceAll("-", "")
+    .replace(/SWAP$/, "");
+}
+
+function toInstId(symbol) {
+  const value = String(symbol).toUpperCase();
+
+  if (value.endsWith("-USDT-SWAP")) {
+    return value;
+  }
+
+  if (!value.endsWith("USDT")) {
+    throw new Error("Unsupported symbol: " + value);
+  }
+
+  return value.slice(0, -4) + "-USDT-SWAP";
 }
 
 async function setup() {
@@ -57,7 +93,7 @@ async function setup() {
   await pool.query(`
     ALTER TABLE radar_account
     ADD COLUMN IF NOT EXISTS diagnostics JSONB
-    NOT NULL DEFAULT '[]'::jsonb
+    NOT NULL DEFAULT '{}'::jsonb
   `);
 
   await pool.query(`
@@ -97,69 +133,76 @@ async function setup() {
   `, [INITIAL_BALANCE]);
 }
 
-// دریافت تمام قراردادهای فعال USDT Perpetual
 async function getUniverse() {
-  const data = await binance("/fapi/v1/exchangeInfo");
+  const data = await marketData(
+    "/api/v5/public/instruments?instType=SWAP"
+  );
 
-  if (!Array.isArray(data.symbols)) {
-    throw new Error("Binance symbol list is missing");
+  if (!Array.isArray(data)) {
+    throw new Error("OKX instrument list is invalid");
   }
 
-  return data.symbols
+  return data
     .filter(item =>
-      item.status === "TRADING" &&
-      item.contractType === "PERPETUAL" &&
-      item.quoteAsset === "USDT" &&
-      item.marginAsset === "USDT"
+      item.state === "live" &&
+      item.settleCcy === "USDT" &&
+      item.instId.endsWith("-USDT-SWAP")
     )
-    .map(item => item.symbol)
+    .map(item => toSymbol(item.instId))
     .sort();
 }
 
-// دریافت قیمت تمام قراردادها با یک درخواست
 async function getAllPrices() {
-  const data = await binance("/fapi/v1/ticker/price");
+  const data = await marketData(
+    "/api/v5/market/tickers?instType=SWAP"
+  );
 
   const prices = {};
 
   for (const item of data) {
-    const price = Number(item.price);
+    if (!item.instId.endsWith("-USDT-SWAP")) {
+      continue;
+    }
+
+    const price = Number(item.last);
 
     if (Number.isFinite(price) && price > 0) {
-      prices[item.symbol] = price;
+      prices[toSymbol(item.instId)] = price;
     }
   }
 
   return prices;
 }
 
-// دریافت کندل‌های بسته‌شده ۱۵ دقیقه‌ای
 async function getCandles(symbol) {
-  const data = await binance(
-    "/fapi/v1/klines?symbol=" +
-    encodeURIComponent(symbol) +
-    "&interval=15m&limit=100"
+  const instId = encodeURIComponent(toInstId(symbol));
+
+  const data = await marketData(
+    "/api/v5/market/candles?instId=" +
+    instId +
+    "&bar=15m&limit=100"
   );
 
   if (!Array.isArray(data)) {
-    throw new Error("Invalid Binance candle response");
+    throw new Error("Invalid candle response");
   }
 
-  const now = Date.now();
-
   return data
-    .filter(c => Number(c[6]) < now)
+    .filter(c => c[8] === "1")
     .map(c => ({
       time: Number(c[0]),
-      closeTime: Number(c[6]),
+      closeTime: Number(c[0]) + 15 * 60 * 1000,
       high: Number(c[2]),
       low: Number(c[3]),
       close: Number(c[4])
-    }));
+    }))
+    .sort((a, b) => a.time - b.time);
 }
 
 function ema(values, period) {
-  if (values.length < period) return null;
+  if (values.length < period) {
+    return null;
+  }
 
   const multiplier = 2 / (period + 1);
 
@@ -177,7 +220,9 @@ function ema(values, period) {
 }
 
 function rsi(values, period = 14) {
-  if (values.length <= period) return null;
+  if (values.length <= period) {
+    return null;
+  }
 
   let gains = 0;
   let losses = 0;
@@ -189,8 +234,11 @@ function rsi(values, period = 14) {
   ) {
     const change = values[i] - values[i - 1];
 
-    if (change > 0) gains += change;
-    else losses -= change;
+    if (change > 0) {
+      gains += change;
+    } else {
+      losses -= change;
+    }
   }
 
   const averageGain = gains / period;
@@ -208,7 +256,7 @@ function rsi(values, period = 14) {
 function getSignal(values) {
   const fast = ema(values, 20);
   const slow = ema(values, 50);
-  const strength = rsi(values);
+  const strength = rsi(values, 14);
 
   if (
     fast === null ||
@@ -277,6 +325,15 @@ async function closeTrade(client, trade, price) {
 export async function runBot() {
   await setup();
 
+  // Get public market data before opening the DB transaction.
+  const universe = await getUniverse();
+
+  if (!universe.length) {
+    throw new Error("OKX returned no active USDT perpetual contracts");
+  }
+
+  const prices = await getAllPrices();
+
   const client = await pool.connect();
 
   try {
@@ -291,19 +348,13 @@ export async function runBot() {
 
     const account = accountResult.rows[0];
 
+    if (!account) {
+      throw new Error("Paper trading account not found");
+    }
+
     let balance = Number(account.balance);
     let cursor = Number(account.scan_cursor || 0);
 
-    // دریافت بازار بایننس
-    const universe = await getUniverse();
-
-    if (!universe.length) {
-      throw new Error("No active USDT perpetual symbols found");
-    }
-
-    const prices = await getAllPrices();
-
-    // بررسی معاملات قبلی
     const openResult = await client.query(`
       SELECT *
       FROM radar_trades
@@ -318,6 +369,7 @@ export async function runBot() {
 
     const diagnostics = [];
 
+    // Monitor existing paper trades.
     for (const trade of openResult.rows) {
       const price = prices[trade.symbol];
 
@@ -325,7 +377,7 @@ export async function runBot() {
         diagnostics.push({
           symbol: trade.symbol,
           status: "PRICE_UNAVAILABLE",
-          reason: "قیمت در بازار بایننس پیدا نشد"
+          reason: "Price unavailable on OKX"
         });
 
         continue;
@@ -359,13 +411,13 @@ export async function runBot() {
           price,
           pnl: Number(result.pnl.toFixed(4)),
           reason: hitStop
-            ? "حد ضرر فعال شد"
-            : "حد سود فعال شد"
+            ? "Stop loss reached"
+            : "Take profit reached"
         });
       }
     }
 
-    // انتخاب ۲۰ ارز از فهرست کامل
+    // Rotate through the full active USDT perpetual list.
     const batch = [];
 
     for (
@@ -378,25 +430,44 @@ export async function runBot() {
       );
     }
 
-    // اسکن نوبتی ارزها
-    for (const symbol of batch) {
+    // Fetch candles concurrently to reduce execution time.
+    const candleResults = await Promise.all(
+      batch.map(async symbol => {
+        try {
+          return {
+            symbol,
+            data: await getCandles(symbol),
+            error: null
+          };
+        } catch (error) {
+          return {
+            symbol,
+            data: null,
+            error: error.message
+          };
+        }
+      })
+    );
+
+    for (const item of candleResults) {
+      const symbol = item.symbol;
       scanned++;
 
       if (openCount >= MAX_OPEN_TRADES) {
         diagnostics.push({
           symbol,
           status: "LIMIT",
-          reason: "حداکثر ۵ معامله باز است"
+          reason: "Maximum open trades reached"
         });
 
         continue;
       }
 
-      if (balance <= 10) {
+      if (balance <= MIN_BALANCE) {
         diagnostics.push({
           symbol,
           status: "NO_BALANCE",
-          reason: "موجودی مجازی کافی نیست"
+          reason: "Not enough virtual balance"
         });
 
         continue;
@@ -413,31 +484,29 @@ export async function runBot() {
         diagnostics.push({
           symbol,
           status: "SKIPPED",
-          reason: "برای این ارز معامله باز وجود دارد"
+          reason: "An open trade already exists"
         });
 
         continue;
       }
 
-      let data;
-
-      try {
-        data = await getCandles(symbol);
-      } catch (error) {
+      if (item.error) {
         diagnostics.push({
           symbol,
           status: "ERROR",
-          reason: "خطای کندل: " + error.message
+          reason: "Candle error: " + item.error
         });
 
         continue;
       }
 
-      if (data.length < 55) {
+      const data = item.data;
+
+      if (!Array.isArray(data) || data.length < 55) {
         diagnostics.push({
           symbol,
           status: "WAIT",
-          reason: "تعداد کندل کافی نیست"
+          reason: "Not enough completed candles"
         });
 
         continue;
@@ -460,8 +529,7 @@ export async function runBot() {
         diagnostics.push({
           symbol,
           status: "WAIT",
-          candleTime: new Date(latest.time).toISOString(),
-          reason: "این کندل قبلاً بررسی شده است"
+          reason: "Candle already checked"
         });
 
         continue;
@@ -479,7 +547,7 @@ export async function runBot() {
 
       const fast = ema(closes, 20);
       const slow = ema(closes, 50);
-      const strength = rsi(closes);
+      const strength = rsi(closes, 14);
 
       const direction = getSignal(closes);
 
@@ -496,7 +564,7 @@ export async function runBot() {
         diagnostics.push({
           ...info,
           status: "NO_ENTRY",
-          reason: "شرایط ورود کامل نیست"
+          reason: "Entry conditions not met"
         });
 
         continue;
@@ -527,7 +595,7 @@ export async function runBot() {
         diagnostics.push({
           ...info,
           status: "NO_BALANCE",
-          reason: "موجودی برای ورود کافی نیست"
+          reason: "Insufficient virtual balance"
         });
 
         continue;
@@ -567,7 +635,7 @@ export async function runBot() {
           diagnostics.push({
             ...info,
             status: "SKIPPED",
-            reason: "معامله باز دیگری برای این ارز وجود دارد"
+            reason: "Another open trade exists"
           });
 
           continue;
@@ -594,14 +662,24 @@ export async function runBot() {
         positionValue: Number(cost.toFixed(4)),
         stopLoss: Number(stop.toFixed(8)),
         takeProfit: Number(target.toFixed(8)),
-        reason: direction === "LONG"
-          ? "معامله آزمایشی LONG باز شد"
-          : "معامله آزمایشی SHORT باز شد"
+        reason: "Simulated " + direction + " trade opened"
       });
     }
 
     const nextCursor =
       (cursor + batch.length) % universe.length;
+
+    const report = {
+      updatedAt: new Date().toISOString(),
+      exchange: EXCHANGE_NAME,
+      universeCount: universe.length,
+      batchSize: batch.length,
+      nextCursor,
+      scanned,
+      opened,
+      closed,
+      results: diagnostics
+    };
 
     await client.query(`
       UPDATE radar_account
@@ -610,17 +688,7 @@ export async function runBot() {
       WHERE id = 1
     `, [
       nextCursor,
-      JSON.stringify({
-        updatedAt: new Date().toISOString(),
-        exchange: "Binance USD-M Futures",
-        universeCount: universe.length,
-        batchSize: batch.length,
-        nextCursor,
-        scanned,
-        opened,
-        closed,
-        results: diagnostics
-      })
+      JSON.stringify(report)
     ]);
 
     await client.query("COMMIT");
@@ -628,7 +696,7 @@ export async function runBot() {
     return {
       ok: true,
       mode: "PAPER_TRADING",
-      exchange: "Binance USD-M Futures",
+      exchange: EXCHANGE_NAME,
       market: "USDT Perpetual",
       interval: INTERVAL,
       universeCount: universe.length,
@@ -641,7 +709,7 @@ export async function runBot() {
       availableBalance: Number(balance.toFixed(4)),
       diagnostics,
       trading: "Simulated LONG and SHORT only",
-      message: "Binance paper trading cycle completed"
+      message: "Paper trading cycle completed"
     };
 
   } catch (error) {
@@ -681,14 +749,20 @@ export async function getStatus() {
     `)
   ]);
 
-  const diagnostics = account.rows[0].diagnostics || {};
+  const row = account.rows[0];
+
+  if (!row) {
+    throw new Error("Paper trading account not found");
+  }
+
+  const diagnostics = row.diagnostics || {};
 
   return {
     ok: true,
     mode: "PAPER_TRADING",
-    exchange: "Binance USD-M Futures",
+    exchange: EXCHANGE_NAME,
     market: "USDT Perpetual",
-    availableBalance: Number(account.rows[0].balance),
+    availableBalance: Number(row.balance),
     openTrades: counts.rows[0].open,
     closedTrades: counts.rows[0].closed,
     maxOpenTrades: MAX_OPEN_TRADES,
