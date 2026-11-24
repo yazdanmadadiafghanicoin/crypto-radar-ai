@@ -11,7 +11,7 @@ const pool = new Pool({
   max: 3
 });
 
-// PAPER TRADING ONLY — OKX public market data
+// PAPER TRADING ONLY
 const BASE_URL = "https://www.okx.com";
 const EXCHANGE_NAME = "OKX USDT Perpetual Swaps";
 
@@ -21,8 +21,14 @@ const FEE_RATE = 0.0005;
 
 const MAX_OPEN_TRADES = 5;
 const MAX_POSITION_PERCENT = 0.18;
+
 const STOP_PERCENT = 0.05;
 const TARGET_MULTIPLIER = 2;
+
+// Smart management
+const BREAK_EVEN_TRIGGER = 0.05;
+const TRAILING_TRIGGER = 0.08;
+const TRAILING_DISTANCE = 0.03;
 
 const BATCH_SIZE = 8;
 const MIN_BALANCE = 1;
@@ -31,9 +37,7 @@ const INTERVAL = "15m";
 async function marketData(path) {
   const response = await fetch(BASE_URL + path, {
     signal: AbortSignal.timeout(12000),
-    headers: {
-      Accept: "application/json"
-    }
+    headers: { Accept: "application/json" }
   });
 
   if (!response.ok) {
@@ -43,9 +47,7 @@ async function marketData(path) {
   const body = await response.json();
 
   if (body.code !== "0") {
-    throw new Error(
-      "OKX API " + body.code + ": " + (body.msg || "Unknown error")
-    );
+    throw new Error("OKX API " + body.code + ": " + body.msg);
   }
 
   return body.data;
@@ -60,9 +62,7 @@ function toSymbol(instId) {
 function toInstId(symbol) {
   const value = String(symbol).toUpperCase();
 
-  if (value.endsWith("-USDT-SWAP")) {
-    return value;
-  }
+  if (value.endsWith("-USDT-SWAP")) return value;
 
   if (!value.endsWith("USDT")) {
     throw new Error("Unsupported symbol: " + value);
@@ -113,6 +113,16 @@ async function setup() {
     )
   `);
 
+  // Safe migration: preserves existing trades.
+  await pool.query(`
+    ALTER TABLE radar_trades
+    ADD COLUMN IF NOT EXISTS highest_price DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS lowest_price DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS trailing_stop DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS break_even_active BOOLEAN
+    NOT NULL DEFAULT FALSE
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS radar_symbol_state (
       symbol TEXT PRIMARY KEY,
@@ -160,9 +170,7 @@ async function getAllPrices() {
   const prices = {};
 
   for (const item of data) {
-    if (!item.instId.endsWith("-USDT-SWAP")) {
-      continue;
-    }
+    if (!item.instId.endsWith("-USDT-SWAP")) continue;
 
     const price = Number(item.last);
 
@@ -179,8 +187,7 @@ async function getCandles(symbol) {
 
   const data = await marketData(
     "/api/v5/market/candles?instId=" +
-    instId +
-    "&bar=15m&limit=100"
+    instId + "&bar=15m&limit=100"
   );
 
   if (!Array.isArray(data)) {
@@ -191,18 +198,13 @@ async function getCandles(symbol) {
     .filter(c => c[8] === "1")
     .map(c => ({
       time: Number(c[0]),
-      closeTime: Number(c[0]) + 15 * 60 * 1000,
-      high: Number(c[2]),
-      low: Number(c[3]),
       close: Number(c[4])
     }))
     .sort((a, b) => a.time - b.time);
 }
 
 function ema(values, period) {
-  if (values.length < period) {
-    return null;
-  }
+  if (values.length < period) return null;
 
   const multiplier = 2 / (period + 1);
 
@@ -220,25 +222,16 @@ function ema(values, period) {
 }
 
 function rsi(values, period = 14) {
-  if (values.length <= period) {
-    return null;
-  }
+  if (values.length <= period) return null;
 
   let gains = 0;
   let losses = 0;
 
-  for (
-    let i = values.length - period;
-    i < values.length;
-    i++
-  ) {
+  for (let i = values.length - period; i < values.length; i++) {
     const change = values[i] - values[i - 1];
 
-    if (change > 0) {
-      gains += change;
-    } else {
-      losses -= change;
-    }
+    if (change > 0) gains += change;
+    else losses -= change;
   }
 
   const averageGain = gains / period;
@@ -258,31 +251,28 @@ function getSignal(values) {
   const slow = ema(values, 50);
   const strength = rsi(values, 14);
 
-  if (
-    fast === null ||
-    slow === null ||
-    strength === null
-  ) {
+  if (fast === null || slow === null || strength === null) {
     return null;
   }
 
-  if (
-    fast > slow &&
-    strength >= 50 &&
-    strength <= 68
-  ) {
+  if (fast > slow && strength >= 50 && strength <= 68) {
     return "LONG";
   }
 
-  if (
-    fast < slow &&
-    strength >= 32 &&
-    strength <= 50
-  ) {
+  if (fast < slow && strength >= 32 && strength <= 50) {
     return "SHORT";
   }
 
   return null;
+}
+
+// Fee-aware break-even exit price.
+function breakEvenPrice(entry, side) {
+  if (side === "SHORT") {
+    return entry * (1 - FEE_RATE) / (1 + FEE_RATE);
+  }
+
+  return entry * (1 + FEE_RATE) / (1 - FEE_RATE);
 }
 
 async function closeTrade(client, trade, price) {
@@ -299,6 +289,7 @@ async function closeTrade(client, trade, price) {
 
   const pnl = gross - entryFee - exitFee;
 
+  // Entry fee was deducted when the position opened.
   const returnedCapital =
     entry * quantity + gross - exitFee;
 
@@ -316,16 +307,120 @@ async function closeTrade(client, trade, price) {
     WHERE id = 1
   `, [returnedCapital]);
 
+  return { pnl, returnedCapital };
+}
+
+async function manageTrade(client, trade, price) {
+  const entry = Number(trade.entry);
+  const isShort = trade.side === "SHORT";
+
+  let highest = Number(trade.highest_price || entry);
+  let lowest = Number(trade.lowest_price || entry);
+  let stop = Number(trade.stop_loss);
+  const target = Number(trade.take_profit);
+
+  let breakEvenActive = trade.break_even_active === true;
+  let trailingStop = trade.trailing_stop == null
+    ? null
+    : Number(trade.trailing_stop);
+
+  highest = Math.max(highest, price);
+  lowest = Math.min(lowest, price);
+
+  const favorableMove = isShort
+    ? (entry - price) / entry
+    : (price - entry) / entry;
+
+  // Move stop to fee-aware break-even.
+  if (
+    !breakEvenActive &&
+    favorableMove >= BREAK_EVEN_TRIGGER
+  ) {
+    breakEvenActive = true;
+
+    const be = breakEvenPrice(entry, trade.side);
+
+    if (isShort) stop = Math.min(stop, be);
+    else stop = Math.max(stop, be);
+  }
+
+  // Start trailing only after the position reaches +8%.
+  if (favorableMove >= TRAILING_TRIGGER) {
+    const proposed = isShort
+      ? lowest * (1 + TRAILING_DISTANCE)
+      : highest * (1 - TRAILING_DISTANCE);
+
+    if (isShort) {
+      trailingStop = trailingStop == null
+        ? proposed
+        : Math.min(trailingStop, proposed);
+
+      stop = Math.min(stop, trailingStop);
+    } else {
+      trailingStop = trailingStop == null
+        ? proposed
+        : Math.max(trailingStop, proposed);
+
+      stop = Math.max(stop, trailingStop);
+    }
+  }
+
+  await client.query(`
+    UPDATE radar_trades
+    SET highest_price = $1,
+        lowest_price = $2,
+        stop_loss = $3,
+        trailing_stop = $4,
+        break_even_active = $5
+    WHERE id = $6 AND status = 'OPEN'
+  `, [
+    highest,
+    lowest,
+    stop,
+    trailingStop,
+    breakEvenActive,
+    trade.id
+  ]);
+
+  const hitStop = isShort
+    ? price >= stop
+    : price <= stop;
+
+  const hitTarget = isShort
+    ? price <= target
+    : price >= target;
+
+  if (hitStop || hitTarget) {
+    const result = await closeTrade(client, trade, price);
+
+    return {
+      closed: true,
+      pnl: result.pnl,
+      reason: hitStop
+        ? (trailingStop !== null
+          ? "Smart stop / trailing stop reached"
+          : breakEvenActive
+            ? "Break-even stop reached"
+            : "Initial stop loss reached")
+        : "Take profit reached"
+    };
+  }
+
   return {
-    pnl,
-    returnedCapital
+    closed: false,
+    stopLoss: stop,
+    takeProfit: target,
+    highestPrice: highest,
+    lowestPrice: lowest,
+    breakEvenActive,
+    trailingStop,
+    favorableMove: Number((favorableMove * 100).toFixed(2))
   };
 }
 
 export async function runBot() {
   await setup();
 
-  // Get public market data before opening the DB transaction.
   const universe = await getUniverse();
 
   if (!universe.length) {
@@ -333,7 +428,6 @@ export async function runBot() {
   }
 
   const prices = await getAllPrices();
-
   const client = await pool.connect();
 
   try {
@@ -353,7 +447,7 @@ export async function runBot() {
     }
 
     let balance = Number(account.balance);
-    let cursor = Number(account.scan_cursor || 0);
+    const cursor = Number(account.scan_cursor || 0);
 
     const openResult = await client.query(`
       SELECT *
@@ -369,7 +463,7 @@ export async function runBot() {
 
     const diagnostics = [];
 
-    // Monitor existing paper trades.
+    // Manage every existing paper position.
     for (const trade of openResult.rows) {
       const price = prices[trade.symbol];
 
@@ -379,28 +473,22 @@ export async function runBot() {
           status: "PRICE_UNAVAILABLE",
           reason: "Price unavailable on OKX"
         });
-
         continue;
       }
 
-      const isShort = trade.side === "SHORT";
+      const management = await manageTrade(
+        client,
+        trade,
+        price
+      );
 
-      const hitStop = isShort
-        ? price >= Number(trade.stop_loss)
-        : price <= Number(trade.stop_loss);
+      if (management.closed) {
+        // Re-read account balance after closing.
+        const updated = await client.query(`
+          SELECT balance FROM radar_account WHERE id = 1
+        `);
 
-      const hitTarget = isShort
-        ? price <= Number(trade.take_profit)
-        : price >= Number(trade.take_profit);
-
-      if (hitStop || hitTarget) {
-        const result = await closeTrade(
-          client,
-          trade,
-          price
-        );
-
-        balance += result.returnedCapital;
+        balance = Number(updated.rows[0].balance);
         openCount--;
         closed++;
 
@@ -409,28 +497,26 @@ export async function runBot() {
           side: trade.side,
           status: "CLOSED",
           price,
-          pnl: Number(result.pnl.toFixed(4)),
-          reason: hitStop
-            ? "Stop loss reached"
-            : "Take profit reached"
+          pnl: Number(management.pnl.toFixed(4)),
+          reason: management.reason
+        });
+      } else {
+        diagnostics.push({
+          symbol: trade.symbol,
+          side: trade.side,
+          status: "MANAGING",
+          price,
+          ...management
         });
       }
     }
 
-    // Rotate through the full active USDT perpetual list.
     const batch = [];
 
-    for (
-      let i = 0;
-      i < Math.min(BATCH_SIZE, universe.length);
-      i++
-    ) {
-      batch.push(
-        universe[(cursor + i) % universe.length]
-      );
+    for (let i = 0; i < Math.min(BATCH_SIZE, universe.length); i++) {
+      batch.push(universe[(cursor + i) % universe.length]);
     }
 
-    // Fetch candles concurrently to reduce execution time.
     const candleResults = await Promise.all(
       batch.map(async symbol => {
         try {
@@ -459,7 +545,6 @@ export async function runBot() {
           status: "LIMIT",
           reason: "Maximum open trades reached"
         });
-
         continue;
       }
 
@@ -469,7 +554,6 @@ export async function runBot() {
           status: "NO_BALANCE",
           reason: "Not enough virtual balance"
         });
-
         continue;
       }
 
@@ -486,7 +570,6 @@ export async function runBot() {
           status: "SKIPPED",
           reason: "An open trade already exists"
         });
-
         continue;
       }
 
@@ -496,7 +579,6 @@ export async function runBot() {
           status: "ERROR",
           reason: "Candle error: " + item.error
         });
-
         continue;
       }
 
@@ -508,7 +590,6 @@ export async function runBot() {
           status: "WAIT",
           reason: "Not enough completed candles"
         });
-
         continue;
       }
 
@@ -531,32 +612,24 @@ export async function runBot() {
           status: "WAIT",
           reason: "Candle already checked"
         });
-
         continue;
       }
 
       await client.query(`
-        INSERT INTO radar_symbol_state (
-          symbol,
-          last_candle
-        )
+        INSERT INTO radar_symbol_state (symbol, last_candle)
         VALUES ($1, $2)
         ON CONFLICT (symbol)
         DO UPDATE SET last_candle = EXCLUDED.last_candle
       `, [symbol, latest.time]);
-
-      const fast = ema(closes, 20);
-      const slow = ema(closes, 50);
-      const strength = rsi(closes, 14);
 
       const direction = getSignal(closes);
 
       const info = {
         symbol,
         price: latest.close,
-        ema20: fast,
-        ema50: slow,
-        rsi: strength,
+        ema20: ema(closes, 20),
+        ema50: ema(closes, 50),
+        rsi: rsi(closes, 14),
         candleTime: new Date(latest.time).toISOString()
       };
 
@@ -566,7 +639,6 @@ export async function runBot() {
           status: "NO_ENTRY",
           reason: "Entry conditions not met"
         });
-
         continue;
       }
 
@@ -576,8 +648,7 @@ export async function runBot() {
 
       let quantity = riskAmount / stopDistance;
 
-      const maxNotional =
-        balance * MAX_POSITION_PERCENT;
+      const maxNotional = balance * MAX_POSITION_PERCENT;
 
       if (quantity * entry > maxNotional) {
         quantity = maxNotional / entry;
@@ -597,7 +668,6 @@ export async function runBot() {
           status: "NO_BALANCE",
           reason: "Insufficient virtual balance"
         });
-
         continue;
       }
 
@@ -619,9 +689,11 @@ export async function runBot() {
             stop_loss,
             take_profit,
             leverage,
-            status
+            status,
+            highest_price,
+            lowest_price
           )
-          VALUES ($1, $2, $3, $4, $5, $6, 1, 'OPEN')
+          VALUES ($1, $2, $3, $4, $5, $6, 1, 'OPEN', $3, $3)
         `, [
           symbol,
           direction,
@@ -637,10 +709,8 @@ export async function runBot() {
             status: "SKIPPED",
             reason: "Another open trade exists"
           });
-
           continue;
         }
-
         throw error;
       }
 
@@ -660,14 +730,13 @@ export async function runBot() {
         side: direction,
         quantity: Number(quantity.toFixed(8)),
         positionValue: Number(cost.toFixed(4)),
-        stopLoss: Number(stop.toFixed(8)),
-        takeProfit: Number(target.toFixed(8)),
-        reason: "Simulated " + direction + " trade opened"
+        stopLoss: stop,
+        takeProfit: target,
+        reason: "Paper " + direction + " trade opened"
       });
     }
 
-    const nextCursor =
-      (cursor + batch.length) % universe.length;
+    const nextCursor = (cursor + batch.length) % universe.length;
 
     const report = {
       updatedAt: new Date().toISOString(),
@@ -709,7 +778,14 @@ export async function runBot() {
       availableBalance: Number(balance.toFixed(4)),
       diagnostics,
       trading: "Simulated LONG and SHORT only",
-      message: "Paper trading cycle completed"
+      management: {
+        initialStopPercent: STOP_PERCENT * 100,
+        takeProfitPercent: STOP_PERCENT * TARGET_MULTIPLIER * 100,
+        breakEvenTriggerPercent: BREAK_EVEN_TRIGGER * 100,
+        trailingTriggerPercent: TRAILING_TRIGGER * 100,
+        trailingDistancePercent: TRAILING_DISTANCE * 100
+      },
+      message: "Smart paper trading cycle completed"
     };
 
   } catch (error) {
