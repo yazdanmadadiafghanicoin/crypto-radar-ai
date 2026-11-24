@@ -15,20 +15,33 @@ const INTERVAL = "15m";
 const RISK = 0.01;
 const INITIAL_BALANCE = 1000;
 const FEE_RATE = 0.001;
-const BATCH_SIZE = 20;
 const MAX_OPEN_TRADES = 5;
 
-async function binance(path) {
+const PAIRS = [
+  { symbol: "BTCUSDT", pair: "XBTUSDT" },
+  { symbol: "ETHUSDT", pair: "ETHUSDT" },
+  { symbol: "SOLUSDT", pair: "SOLUSDT" },
+  { symbol: "XRPUSDT", pair: "XRPUSDT" },
+  { symbol: "DOGEUSDT", pair: "DOGEUSDT" }
+];
+
+async function kraken(path) {
   const response = await fetch(
-    `https://api.binance.com${path}`,
-    { signal: AbortSignal.timeout(12000) }
+    "https://api.kraken.com/0/public/" + path,
+    { signal: AbortSignal.timeout(15000) }
   );
 
   if (!response.ok) {
-    throw new Error(`Binance Spot HTTP ${response.status}`);
+    throw new Error("Kraken HTTP " + response.status);
   }
 
-  return response.json();
+  const data = await response.json();
+
+  if (data.error && data.error.length) {
+    throw new Error(data.error.join(", "));
+  }
+
+  return data.result;
 }
 
 async function setup() {
@@ -87,51 +100,48 @@ async function setup() {
   `, [INITIAL_BALANCE]);
 }
 
-async function getUniverse() {
-  const [info, tickers] = await Promise.all([
-    binance("/api/v3/exchangeInfo"),
-    binance("/api/v3/ticker/24hr")
-  ]);
-
-  const volumes = new Map(
-    tickers.map(t => [t.symbol, Number(t.quoteVolume || 0)])
+async function candles(pair) {
+  const result = await kraken(
+    "OHLC?pair=" + encodeURIComponent(pair) + "&interval=15"
   );
 
-  return info.symbols
-    .filter(s =>
-      s.status === "TRADING" &&
-      s.quoteAsset === "USDT" &&
-      s.isSpotTradingAllowed !== false
-    )
-    .map(s => ({
-      symbol: s.symbol,
-      volume: volumes.get(s.symbol) || 0
-    }))
-    .filter(s => s.volume > 0)
-    .sort((a, b) => b.volume - a.volume);
-}
+  const key = Object.keys(result).find(k => k !== "last");
 
-async function candles(symbol) {
-  const data = await binance(
-    `/api/v3/klines?symbol=${symbol}&interval=${INTERVAL}&limit=100`
-  );
+  if (!key || !Array.isArray(result[key])) {
+    throw new Error("Kraken candle data missing: " + pair);
+  }
 
   const now = Date.now();
 
-  return data
-    .filter(k => Number(k[6]) < now)
-    .map(k => ({
-      time: Number(k[0]),
-      high: Number(k[2]),
-      low: Number(k[3]),
-      close: Number(k[4])
+  return result[key]
+    .filter(c => Number(c[0]) * 1000 + 15 * 60 * 1000 <= now)
+    .map(c => ({
+      time: Number(c[0]) * 1000,
+      high: Number(c[2]),
+      low: Number(c[3]),
+      close: Number(c[4])
     }));
+}
+
+async function getPrice(pair) {
+  const result = await kraken(
+    "Ticker?pair=" + encodeURIComponent(pair)
+  );
+
+  const key = Object.keys(result)[0];
+
+  if (!key || !result[key].c) {
+    throw new Error("Kraken ticker missing: " + pair);
+  }
+
+  return Number(result[key].c[0]);
 }
 
 function ema(values, period) {
   if (values.length < period) return null;
 
   const multiplier = 2 / (period + 1);
+
   let result = values
     .slice(0, period)
     .reduce((a, b) => a + b, 0) / period;
@@ -161,7 +171,9 @@ function rsi(values, period = 14) {
   const averageGain = gains / period;
   const averageLoss = losses / period;
 
-  if (averageLoss === 0) return averageGain === 0 ? 50 : 100;
+  if (averageLoss === 0) {
+    return averageGain === 0 ? 50 : 100;
+  }
 
   return 100 - 100 / (1 + averageGain / averageLoss);
 }
@@ -175,7 +187,11 @@ function signal(values) {
     return null;
   }
 
-  if (fast > slow && strength >= 50 && strength <= 68) {
+  if (
+    fast > slow &&
+    strength >= 50 &&
+    strength <= 68
+  ) {
     return "LONG";
   }
 
@@ -187,10 +203,11 @@ async function closeTrade(client, trade, price) {
   const quantity = Number(trade.quantity);
 
   const gross = (price - entry) * quantity;
-  const fees = (entry + price) * quantity * FEE_RATE;
-  const pnl = gross - fees;
+  const entryFee = entry * quantity * FEE_RATE;
+  const exitFee = price * quantity * FEE_RATE;
 
-  const returnedCapital = entry * quantity + pnl;
+  const pnl = gross - entryFee - exitFee;
+  const returnedCapital = entry * quantity + gross - exitFee;
 
   await client.query(`
     UPDATE radar_trades
@@ -206,17 +223,11 @@ async function closeTrade(client, trade, price) {
     WHERE id = 1
   `, [returnedCapital]);
 
-  return pnl;
+  return returnedCapital;
 }
 
 export async function runBot() {
   await setup();
-
-  const universe = await getUniverse();
-
-  if (!universe.length) {
-    throw new Error("No eligible USDT Spot pairs found");
-  }
 
   const client = await pool.connect();
 
@@ -240,28 +251,28 @@ export async function runBot() {
 
     const openTrades = openResult.rows;
 
-    const prices = await binance("/api/v3/ticker/price");
-
-    const priceMap = new Map(
-      prices.map(p => [p.symbol, Number(p.price)])
-    );
-
     let closed = 0;
 
     for (const trade of openTrades) {
-      if (trade.side !== "LONG") continue;
+      const item = PAIRS.find(p => p.symbol === trade.symbol);
 
-      const price = priceMap.get(trade.symbol);
+      if (!item) continue;
 
-      if (!Number.isFinite(price) || price <= 0) continue;
+      try {
+        const price = await getPrice(item.pair);
 
-      const hitStop = price <= Number(trade.stop_loss);
-      const hitTarget = price >= Number(trade.take_profit);
+        if (!Number.isFinite(price) || price <= 0) continue;
 
-      if (hitStop || hitTarget) {
-        const pnl = await closeTrade(client, trade, price);
-        balance += Number(trade.entry) * Number(trade.quantity) + pnl;
-        closed++;
+        const hitStop = price <= Number(trade.stop_loss);
+        const hitTarget = price >= Number(trade.take_profit);
+
+        if (hitStop || hitTarget) {
+          const returned = await closeTrade(client, trade, price);
+          balance += returned;
+          closed++;
+        }
+      } catch (error) {
+        console.error("Close check failed:", trade.symbol, error.message);
       }
     }
 
@@ -276,23 +287,18 @@ export async function runBot() {
     let scanned = 0;
 
     const cursor = Number(account.scan_cursor || 0);
-    const batch = [];
 
-    for (let i = 0; i < Math.min(BATCH_SIZE, universe.length); i++) {
-      batch.push(universe[(cursor + i) % universe.length]);
-    }
-
-    for (const item of batch) {
+    for (let i = 0; i < PAIRS.length; i++) {
       if (openCount >= MAX_OPEN_TRADES) break;
       if (balance <= 10) break;
 
-      const symbol = item.symbol;
+      const item = PAIRS[(cursor + i) % PAIRS.length];
 
       const existing = await client.query(`
         SELECT id FROM radar_trades
         WHERE symbol = $1 AND status = 'OPEN'
         LIMIT 1
-      `, [symbol]);
+      `, [item.symbol]);
 
       if (existing.rowCount) {
         scanned++;
@@ -302,8 +308,9 @@ export async function runBot() {
       let data;
 
       try {
-        data = await candles(symbol);
-      } catch {
+        data = await candles(item.pair);
+      } catch (error) {
+        console.error("Candle error:", item.symbol, error.message);
         scanned++;
         continue;
       }
@@ -317,9 +324,10 @@ export async function runBot() {
       const closes = data.map(c => c.close);
 
       const previous = await client.query(`
-        SELECT last_candle FROM radar_symbol_state
+        SELECT last_candle
+        FROM radar_symbol_state
         WHERE symbol = $1
-      `, [symbol]);
+      `, [item.symbol]);
 
       const previousTime = previous.rowCount
         ? Number(previous.rows[0].last_candle)
@@ -335,13 +343,11 @@ export async function runBot() {
         VALUES ($1, $2)
         ON CONFLICT (symbol)
         DO UPDATE SET last_candle = EXCLUDED.last_candle
-      `, [symbol, latest.time]);
+      `, [item.symbol, latest.time]);
 
       scanned++;
 
-      const direction = signal(closes);
-
-      if (direction !== "LONG") continue;
+      if (signal(closes) !== "LONG") continue;
 
       const entry = latest.close;
       const stopDistance = entry * 0.01;
@@ -350,9 +356,8 @@ export async function runBot() {
       let quantity = riskAmount / stopDistance;
 
       const maxNotional = balance * 0.9;
-      const notional = quantity * entry;
 
-      if (notional > maxNotional) {
+      if (quantity * entry > maxNotional) {
         quantity = maxNotional / entry;
       }
 
@@ -366,37 +371,32 @@ export async function runBot() {
       const stop = entry - stopDistance;
       const target = entry + stopDistance * 2;
 
-      try {
-        await client.query(`
-          INSERT INTO radar_trades (
-            symbol, side, entry, quantity,
-            stop_loss, take_profit, leverage, status
-          )
-          VALUES ($1, 'LONG', $2, $3, $4, $5, 1, 'OPEN')
-        `, [
-          symbol,
-          entry,
-          quantity,
-          stop,
-          target
-        ]);
+      await client.query(`
+        INSERT INTO radar_trades (
+          symbol, side, entry, quantity,
+          stop_loss, take_profit, leverage, status
+        )
+        VALUES ($1, 'LONG', $2, $3, $4, $5, 1, 'OPEN')
+      `, [
+        item.symbol,
+        entry,
+        quantity,
+        stop,
+        target
+      ]);
 
-        await client.query(`
-          UPDATE radar_account
-          SET balance = balance - $1
-          WHERE id = 1
-        `, [totalCost]);
+      await client.query(`
+        UPDATE radar_account
+        SET balance = balance - $1
+        WHERE id = 1
+      `, [totalCost]);
 
-        balance -= totalCost;
-        openCount++;
-        opened++;
-      } catch (error) {
-        if (error.code !== "23505") throw error;
-      }
+      balance -= totalCost;
+      openCount++;
+      opened++;
     }
 
-    const nextCursor =
-      (cursor + Math.max(1, scanned)) % universe.length;
+    const nextCursor = (cursor + Math.max(1, scanned)) % PAIRS.length;
 
     await client.query(`
       UPDATE radar_account
@@ -409,9 +409,9 @@ export async function runBot() {
     return {
       ok: true,
       mode: "PAPER_TRADING",
-      exchange: "Binance Spot",
+      exchange: "Kraken Spot",
       interval: INTERVAL,
-      eligibleSymbols: universe.length,
+      eligibleSymbols: PAIRS.length,
       scanned,
       opened,
       closed,
@@ -420,7 +420,7 @@ export async function runBot() {
       riskPerTrade: "1%",
       leverage: 1,
       trading: "BUY only - simulated",
-      message: "Spot paper trading cycle completed"
+      message: "Kraken paper trading cycle completed"
     };
 
   } catch (error) {
@@ -454,7 +454,7 @@ export async function getStatus() {
   return {
     ok: true,
     mode: "PAPER_TRADING",
-    exchange: "Binance Spot",
+    exchange: "Kraken Spot",
     availableBalance: Number(account.rows[0].balance),
     openTrades: counts.rows[0].open,
     closedTrades: counts.rows[0].closed,
