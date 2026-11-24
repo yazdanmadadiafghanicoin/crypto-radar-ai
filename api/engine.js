@@ -8,25 +8,24 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL
     ? { rejectUnauthorized: false }
     : undefined,
-  max: 2,
+  max: 2
 });
 
 const INTERVAL = "15m";
-const LEVERAGE = 2;
 const RISK = 0.01;
 const INITIAL_BALANCE = 1000;
-const FEE_RATE = 0.0005;
+const FEE_RATE = 0.001;
 const BATCH_SIZE = 20;
 const MAX_OPEN_TRADES = 5;
 
 async function binance(path) {
   const response = await fetch(
-    `https://fapi.binance.com${path}`,
+    `https://api.binance.com${path}`,
     { signal: AbortSignal.timeout(12000) }
   );
 
   if (!response.ok) {
-    throw new Error(`Binance HTTP ${response.status}`);
+    throw new Error(`Binance Spot HTTP ${response.status}`);
   }
 
   return response.json();
@@ -60,7 +59,7 @@ async function setup() {
       quantity DOUBLE PRECISION NOT NULL,
       stop_loss DOUBLE PRECISION NOT NULL,
       take_profit DOUBLE PRECISION NOT NULL,
-      leverage INTEGER NOT NULL DEFAULT 2,
+      leverage INTEGER NOT NULL DEFAULT 1,
       status TEXT NOT NULL DEFAULT 'OPEN',
       pnl DOUBLE PRECISION DEFAULT 0,
       opened_at TIMESTAMPTZ DEFAULT NOW(),
@@ -90,8 +89,8 @@ async function setup() {
 
 async function getUniverse() {
   const [info, tickers] = await Promise.all([
-    binance("/fapi/v1/exchangeInfo"),
-    binance("/fapi/v1/ticker/24hr")
+    binance("/api/v3/exchangeInfo"),
+    binance("/api/v3/ticker/24hr")
   ]);
 
   const volumes = new Map(
@@ -101,9 +100,8 @@ async function getUniverse() {
   return info.symbols
     .filter(s =>
       s.status === "TRADING" &&
-      s.contractType === "PERPETUAL" &&
       s.quoteAsset === "USDT" &&
-      s.marginAsset === "USDT"
+      s.isSpotTradingAllowed !== false
     )
     .map(s => ({
       symbol: s.symbol,
@@ -115,7 +113,7 @@ async function getUniverse() {
 
 async function candles(symbol) {
   const data = await binance(
-    `/fapi/v1/klines?symbol=${symbol}&interval=${INTERVAL}&limit=100`
+    `/api/v3/klines?symbol=${symbol}&interval=${INTERVAL}&limit=100`
   );
 
   const now = Date.now();
@@ -160,10 +158,10 @@ function rsi(values, period = 14) {
     else losses -= change;
   }
 
-  if (losses === 0) return 100;
-
   const averageGain = gains / period;
   const averageLoss = losses / period;
+
+  if (averageLoss === 0) return averageGain === 0 ? 50 : 100;
 
   return 100 - 100 / (1 + averageGain / averageLoss);
 }
@@ -181,10 +179,6 @@ function signal(values) {
     return "LONG";
   }
 
-  if (fast < slow && strength <= 50 && strength >= 32) {
-    return "SHORT";
-  }
-
   return null;
 }
 
@@ -192,12 +186,11 @@ async function closeTrade(client, trade, price) {
   const entry = Number(trade.entry);
   const quantity = Number(trade.quantity);
 
-  const gross = trade.side === "LONG"
-    ? (price - entry) * quantity
-    : (entry - price) * quantity;
-
+  const gross = (price - entry) * quantity;
   const fees = (entry + price) * quantity * FEE_RATE;
   const pnl = gross - fees;
+
+  const returnedCapital = entry * quantity + pnl;
 
   await client.query(`
     UPDATE radar_trades
@@ -211,7 +204,7 @@ async function closeTrade(client, trade, price) {
     UPDATE radar_account
     SET balance = balance + $1
     WHERE id = 1
-  `, [pnl]);
+  `, [returnedCapital]);
 
   return pnl;
 }
@@ -222,7 +215,7 @@ export async function runBot() {
   const universe = await getUniverse();
 
   if (!universe.length) {
-    throw new Error("No eligible USDT perpetual contracts found");
+    throw new Error("No eligible USDT Spot pairs found");
   }
 
   const client = await pool.connect();
@@ -247,7 +240,8 @@ export async function runBot() {
 
     const openTrades = openResult.rows;
 
-    const prices = await binance("/fapi/v1/ticker/price");
+    const prices = await binance("/api/v3/ticker/price");
+
     const priceMap = new Map(
       prices.map(p => [p.symbol, Number(p.price)])
     );
@@ -255,21 +249,18 @@ export async function runBot() {
     let closed = 0;
 
     for (const trade of openTrades) {
+      if (trade.side !== "LONG") continue;
+
       const price = priceMap.get(trade.symbol);
 
       if (!Number.isFinite(price) || price <= 0) continue;
 
-      const hitStop = trade.side === "LONG"
-        ? price <= Number(trade.stop_loss)
-        : price >= Number(trade.stop_loss);
-
-      const hitTarget = trade.side === "LONG"
-        ? price >= Number(trade.take_profit)
-        : price <= Number(trade.take_profit);
+      const hitStop = price <= Number(trade.stop_loss);
+      const hitTarget = price >= Number(trade.take_profit);
 
       if (hitStop || hitTarget) {
         const pnl = await closeTrade(client, trade, price);
-        balance += pnl;
+        balance += Number(trade.entry) * Number(trade.quantity) + pnl;
         closed++;
       }
     }
@@ -293,6 +284,7 @@ export async function runBot() {
 
     for (const item of batch) {
       if (openCount >= MAX_OPEN_TRADES) break;
+      if (balance <= 10) break;
 
       const symbol = item.symbol;
 
@@ -349,28 +341,30 @@ export async function runBot() {
 
       const direction = signal(closes);
 
-      if (!direction) continue;
+      if (direction !== "LONG") continue;
 
       const entry = latest.close;
       const stopDistance = entry * 0.01;
       const riskAmount = balance * RISK;
 
-      const quantity = riskAmount / stopDistance;
+      let quantity = riskAmount / stopDistance;
 
+      const maxNotional = balance * 0.9;
+      const notional = quantity * entry;
+
+      if (notional > maxNotional) {
+        quantity = maxNotional / entry;
+      }
+
+      const cost = quantity * entry;
+      const entryFee = cost * FEE_RATE;
+      const totalCost = cost + entryFee;
+
+      if (totalCost > balance) continue;
       if (!Number.isFinite(quantity) || quantity <= 0) continue;
 
-      const marginRequired =
-        (quantity * entry) / LEVERAGE;
-
-      if (marginRequired > balance * 0.9) continue;
-
-      const stop = direction === "LONG"
-        ? entry - stopDistance
-        : entry + stopDistance;
-
-      const target = direction === "LONG"
-        ? entry + stopDistance * 2
-        : entry - stopDistance * 2;
+      const stop = entry - stopDistance;
+      const target = entry + stopDistance * 2;
 
       try {
         await client.query(`
@@ -378,17 +372,22 @@ export async function runBot() {
             symbol, side, entry, quantity,
             stop_loss, take_profit, leverage, status
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, 'OPEN')
+          VALUES ($1, 'LONG', $2, $3, $4, $5, 1, 'OPEN')
         `, [
           symbol,
-          direction,
           entry,
           quantity,
           stop,
-          target,
-          LEVERAGE
+          target
         ]);
 
+        await client.query(`
+          UPDATE radar_account
+          SET balance = balance - $1
+          WHERE id = 1
+        `, [totalCost]);
+
+        balance -= totalCost;
         openCount++;
         opened++;
       } catch (error) {
@@ -410,17 +409,18 @@ export async function runBot() {
     return {
       ok: true,
       mode: "PAPER_TRADING",
-      exchange: "Binance USD-M Futures",
+      exchange: "Binance Spot",
       interval: INTERVAL,
       eligibleSymbols: universe.length,
       scanned,
       opened,
       closed,
       openTrades: openCount,
-      balance: Number(balance.toFixed(4)),
-      leverage: LEVERAGE,
-      riskPerTrade: `${RISK * 100}%`,
-      message: "Paper trading cycle completed"
+      availableBalance: Number(balance.toFixed(4)),
+      riskPerTrade: "1%",
+      leverage: 1,
+      trading: "BUY only - simulated",
+      message: "Spot paper trading cycle completed"
     };
 
   } catch (error) {
@@ -454,7 +454,8 @@ export async function getStatus() {
   return {
     ok: true,
     mode: "PAPER_TRADING",
-    balance: Number(account.rows[0].balance),
+    exchange: "Binance Spot",
+    availableBalance: Number(account.rows[0].balance),
     openTrades: counts.rows[0].open,
     closedTrades: counts.rows[0].closed,
     trades: trades.rows
