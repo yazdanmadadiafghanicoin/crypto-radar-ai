@@ -358,5 +358,14 @@ loadTrends();
 setInterval(loadStatus,30000);
 setInterval(loadTrends,60000);
 </script>
+
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+if (window.Telegram && window.Telegram.WebApp) {
+  const tg = window.Telegram.WebApp;
+  tg.ready();
+  tg.expand();
+}
+</script>
 </body>
 </html>
