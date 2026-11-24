@@ -11,40 +11,28 @@ const pool = new Pool({
   max: 2
 });
 
+// Binance USD-M Futures - PAPER TRADING ONLY
+const BASE_URL = "https://fapi.binance.com";
 const INTERVAL = "15m";
-const RISK = 0.01;
 const INITIAL_BALANCE = 1000;
-const FEE_RATE = 0.001;
+const RISK = 0.01;
+const FEE_RATE = 0.0005;
 const MAX_OPEN_TRADES = 5;
 const MAX_POSITION_PERCENT = 0.18;
 const STOP_PERCENT = 0.05;
 const TARGET_MULTIPLIER = 2;
+const BATCH_SIZE = 20;
 
-const PAIRS = [
-  { symbol: "BTCUSDT", pair: "XBTUSDT" },
-  { symbol: "ETHUSDT", pair: "ETHUSDT" },
-  { symbol: "SOLUSDT", pair: "SOLUSDT" },
-  { symbol: "XRPUSDT", pair: "XRPUSDT" },
-  { symbol: "DOGEUSDT", pair: "DOGEUSDT" }
-];
-
-async function kraken(path) {
-  const response = await fetch(
-    "https://api.kraken.com/0/public/" + path,
-    { signal: AbortSignal.timeout(15000) }
-  );
+async function binance(path) {
+  const response = await fetch(BASE_URL + path, {
+    signal: AbortSignal.timeout(15000)
+  });
 
   if (!response.ok) {
-    throw new Error("Kraken HTTP " + response.status);
+    throw new Error("Binance HTTP " + response.status);
   }
 
-  const data = await response.json();
-
-  if (data.error?.length) {
-    throw new Error(data.error.join(", "));
-  }
-
-  return data.result;
+  return response.json();
 }
 
 async function setup() {
@@ -109,41 +97,65 @@ async function setup() {
   `, [INITIAL_BALANCE]);
 }
 
-async function candles(pair) {
-  const result = await kraken(
-    "OHLC?pair=" + encodeURIComponent(pair) + "&interval=15"
+// دریافت تمام قراردادهای فعال USDT Perpetual
+async function getUniverse() {
+  const data = await binance("/fapi/v1/exchangeInfo");
+
+  if (!Array.isArray(data.symbols)) {
+    throw new Error("Binance symbol list is missing");
+  }
+
+  return data.symbols
+    .filter(item =>
+      item.status === "TRADING" &&
+      item.contractType === "PERPETUAL" &&
+      item.quoteAsset === "USDT" &&
+      item.marginAsset === "USDT"
+    )
+    .map(item => item.symbol)
+    .sort();
+}
+
+// دریافت قیمت تمام قراردادها با یک درخواست
+async function getAllPrices() {
+  const data = await binance("/fapi/v1/ticker/price");
+
+  const prices = {};
+
+  for (const item of data) {
+    const price = Number(item.price);
+
+    if (Number.isFinite(price) && price > 0) {
+      prices[item.symbol] = price;
+    }
+  }
+
+  return prices;
+}
+
+// دریافت کندل‌های بسته‌شده ۱۵ دقیقه‌ای
+async function getCandles(symbol) {
+  const data = await binance(
+    "/fapi/v1/klines?symbol=" +
+    encodeURIComponent(symbol) +
+    "&interval=15m&limit=100"
   );
 
-  const key = Object.keys(result).find(k => k !== "last");
-
-  if (!key || !Array.isArray(result[key])) {
-    throw new Error("Kraken candle data missing: " + pair);
+  if (!Array.isArray(data)) {
+    throw new Error("Invalid Binance candle response");
   }
 
   const now = Date.now();
 
-  return result[key]
-    .filter(c => Number(c[0]) * 1000 + 900000 <= now)
+  return data
+    .filter(c => Number(c[6]) < now)
     .map(c => ({
-      time: Number(c[0]) * 1000,
+      time: Number(c[0]),
+      closeTime: Number(c[6]),
       high: Number(c[2]),
       low: Number(c[3]),
       close: Number(c[4])
     }));
-}
-
-async function getPrice(pair) {
-  const result = await kraken(
-    "Ticker?pair=" + encodeURIComponent(pair)
-  );
-
-  const key = Object.keys(result)[0];
-
-  if (!key || !result[key].c) {
-    throw new Error("Kraken ticker missing: " + pair);
-  }
-
-  return Number(result[key].c[0]);
 }
 
 function ema(values, period) {
@@ -151,11 +163,13 @@ function ema(values, period) {
 
   const multiplier = 2 / (period + 1);
 
-  let result = values.slice(0, period)
+  let result = values
+    .slice(0, period)
     .reduce((a, b) => a + b, 0) / period;
 
   for (let i = period; i < values.length; i++) {
-    result = values[i] * multiplier +
+    result =
+      values[i] * multiplier +
       result * (1 - multiplier);
   }
 
@@ -168,7 +182,11 @@ function rsi(values, period = 14) {
   let gains = 0;
   let losses = 0;
 
-  for (let i = values.length - period; i < values.length; i++) {
+  for (
+    let i = values.length - period;
+    i < values.length;
+    i++
+  ) {
     const change = values[i] - values[i - 1];
 
     if (change > 0) gains += change;
@@ -182,23 +200,37 @@ function rsi(values, period = 14) {
     return averageGain === 0 ? 50 : 100;
   }
 
-  return 100 - 100 / (1 + averageGain / averageLoss);
+  return 100 - 100 / (
+    1 + averageGain / averageLoss
+  );
 }
 
-function signal(values) {
+function getSignal(values) {
   const fast = ema(values, 20);
   const slow = ema(values, 50);
   const strength = rsi(values);
 
-  if (fast === null || slow === null || strength === null) {
+  if (
+    fast === null ||
+    slow === null ||
+    strength === null
+  ) {
     return null;
   }
 
-  if (fast > slow && strength >= 50 && strength <= 68) {
+  if (
+    fast > slow &&
+    strength >= 50 &&
+    strength <= 68
+  ) {
     return "LONG";
   }
 
-  if (fast < slow && strength >= 32 && strength <= 50) {
+  if (
+    fast < slow &&
+    strength >= 32 &&
+    strength <= 50
+  ) {
     return "SHORT";
   }
 
@@ -218,7 +250,9 @@ async function closeTrade(client, trade, price) {
   const exitFee = price * quantity * FEE_RATE;
 
   const pnl = gross - entryFee - exitFee;
-  const returnedCapital = entry * quantity + gross - exitFee;
+
+  const returnedCapital =
+    entry * quantity + gross - exitFee;
 
   await client.query(`
     UPDATE radar_trades
@@ -234,7 +268,10 @@ async function closeTrade(client, trade, price) {
     WHERE id = 1
   `, [returnedCapital]);
 
-  return { returnedCapital, pnl };
+  return {
+    pnl,
+    returnedCapital
+  };
 }
 
 export async function runBot() {
@@ -246,136 +283,163 @@ export async function runBot() {
     await client.query("BEGIN");
 
     const accountResult = await client.query(`
-      SELECT * FROM radar_account
+      SELECT *
+      FROM radar_account
       WHERE id = 1
       FOR UPDATE
     `);
 
     const account = accountResult.rows[0];
-    let balance = Number(account.balance);
 
+    let balance = Number(account.balance);
+    let cursor = Number(account.scan_cursor || 0);
+
+    // دریافت بازار بایننس
+    const universe = await getUniverse();
+
+    if (!universe.length) {
+      throw new Error("No active USDT perpetual symbols found");
+    }
+
+    const prices = await getAllPrices();
+
+    // بررسی معاملات قبلی
     const openResult = await client.query(`
-      SELECT * FROM radar_trades
+      SELECT *
+      FROM radar_trades
       WHERE status = 'OPEN'
       ORDER BY opened_at ASC
     `);
 
     let openCount = openResult.rowCount;
-    let closed = 0;
     let opened = 0;
+    let closed = 0;
     let scanned = 0;
 
     const diagnostics = [];
-    const cursor = Number(account.scan_cursor || 0);
 
-    // بررسی معاملات باز
     for (const trade of openResult.rows) {
-      const item = PAIRS.find(p => p.symbol === trade.symbol);
-      if (!item) continue;
+      const price = prices[trade.symbol];
 
-      try {
-        const price = await getPrice(item.pair);
-
-        if (!Number.isFinite(price) || price <= 0) continue;
-
-        const isShort = trade.side === "SHORT";
-
-        const hitStop = isShort
-          ? price >= Number(trade.stop_loss)
-          : price <= Number(trade.stop_loss);
-
-        const hitTarget = isShort
-          ? price <= Number(trade.take_profit)
-          : price >= Number(trade.take_profit);
-
-        if (hitStop || hitTarget) {
-          const result = await closeTrade(client, trade, price);
-
-          balance += result.returnedCapital;
-          openCount--;
-          closed++;
-
-          diagnostics.push({
-            symbol: trade.symbol,
-            status: "CLOSED",
-            side: trade.side,
-            price,
-            pnl: Number(result.pnl.toFixed(4)),
-            reason: hitStop
-              ? "حد ضرر فعال شد"
-              : "حد سود فعال شد"
-          });
-        }
-      } catch (error) {
+      if (!price) {
         diagnostics.push({
           symbol: trade.symbol,
-          status: "ERROR",
-          reason: "خطا در بررسی معامله: " + error.message
+          status: "PRICE_UNAVAILABLE",
+          reason: "قیمت در بازار بایننس پیدا نشد"
+        });
+
+        continue;
+      }
+
+      const isShort = trade.side === "SHORT";
+
+      const hitStop = isShort
+        ? price >= Number(trade.stop_loss)
+        : price <= Number(trade.stop_loss);
+
+      const hitTarget = isShort
+        ? price <= Number(trade.take_profit)
+        : price >= Number(trade.take_profit);
+
+      if (hitStop || hitTarget) {
+        const result = await closeTrade(
+          client,
+          trade,
+          price
+        );
+
+        balance += result.returnedCapital;
+        openCount--;
+        closed++;
+
+        diagnostics.push({
+          symbol: trade.symbol,
+          side: trade.side,
+          status: "CLOSED",
+          price,
+          pnl: Number(result.pnl.toFixed(4)),
+          reason: hitStop
+            ? "حد ضرر فعال شد"
+            : "حد سود فعال شد"
         });
       }
     }
 
-    // بررسی ارزها برای ورود جدید
-    for (let i = 0; i < PAIRS.length; i++) {
+    // انتخاب ۲۰ ارز از فهرست کامل
+    const batch = [];
+
+    for (
+      let i = 0;
+      i < Math.min(BATCH_SIZE, universe.length);
+      i++
+    ) {
+      batch.push(
+        universe[(cursor + i) % universe.length]
+      );
+    }
+
+    // اسکن نوبتی ارزها
+    for (const symbol of batch) {
+      scanned++;
+
       if (openCount >= MAX_OPEN_TRADES) {
         diagnostics.push({
+          symbol,
           status: "LIMIT",
-          reason: "حداکثر تعداد معاملات همزمان تکمیل شده است"
+          reason: "حداکثر ۵ معامله باز است"
         });
-        break;
+
+        continue;
       }
 
       if (balance <= 10) {
         diagnostics.push({
+          symbol,
           status: "NO_BALANCE",
           reason: "موجودی مجازی کافی نیست"
         });
-        break;
+
+        continue;
       }
 
-      const item = PAIRS[(cursor + i) % PAIRS.length];
-
       const existing = await client.query(`
-        SELECT id FROM radar_trades
+        SELECT id
+        FROM radar_trades
         WHERE symbol = $1 AND status = 'OPEN'
         LIMIT 1
-      `, [item.symbol]);
+      `, [symbol]);
 
       if (existing.rowCount) {
         diagnostics.push({
-          symbol: item.symbol,
+          symbol,
           status: "SKIPPED",
-          reason: "برای این ارز از قبل معامله باز وجود دارد"
+          reason: "برای این ارز معامله باز وجود دارد"
         });
 
-        scanned++;
         continue;
       }
 
       let data;
 
       try {
-        data = await candles(item.pair);
+        data = await getCandles(symbol);
       } catch (error) {
         diagnostics.push({
-          symbol: item.symbol,
+          symbol,
           status: "ERROR",
-          reason: "خطای دریافت کندل: " + error.message
+          reason: "خطای کندل: " + error.message
         });
 
-        scanned++;
         continue;
       }
 
       if (data.length < 55) {
         diagnostics.push({
-          symbol: item.symbol,
+          symbol,
           status: "WAIT",
-          candles: data.length,
-          reason: "حداقل ۵۵ کندل برای تحلیل لازم است"
+          reason: "تعداد کندل کافی نیست"
         });
 
-        scanned++;
         continue;
       }
 
@@ -383,9 +447,10 @@ export async function runBot() {
       const closes = data.map(c => c.close);
 
       const previous = await client.query(`
-        SELECT last_candle FROM radar_symbol_state
+        SELECT last_candle
+        FROM radar_symbol_state
         WHERE symbol = $1
-      `, [item.symbol]);
+      `, [symbol]);
 
       const previousTime = previous.rowCount
         ? Number(previous.rows[0].last_candle)
@@ -393,56 +458,45 @@ export async function runBot() {
 
       if (latest.time <= previousTime) {
         diagnostics.push({
-          symbol: item.symbol,
+          symbol,
           status: "WAIT",
           candleTime: new Date(latest.time).toISOString(),
-          reason: "این کندل قبلاً بررسی شده؛ منتظر کندل جدید هستیم"
+          reason: "این کندل قبلاً بررسی شده است"
         });
 
-        scanned++;
         continue;
       }
 
       await client.query(`
-        INSERT INTO radar_symbol_state (symbol, last_candle)
+        INSERT INTO radar_symbol_state (
+          symbol,
+          last_candle
+        )
         VALUES ($1, $2)
         ON CONFLICT (symbol)
         DO UPDATE SET last_candle = EXCLUDED.last_candle
-      `, [item.symbol, latest.time]);
-
-      scanned++;
+      `, [symbol, latest.time]);
 
       const fast = ema(closes, 20);
       const slow = ema(closes, 50);
       const strength = rsi(closes);
-      const direction = signal(closes);
 
-      const diagnostic = {
-        symbol: item.symbol,
-        candleTime: new Date(latest.time).toISOString(),
+      const direction = getSignal(closes);
+
+      const info = {
+        symbol,
         price: latest.close,
         ema20: fast,
         ema50: slow,
-        rsi: strength
+        rsi: strength,
+        candleTime: new Date(latest.time).toISOString()
       };
 
       if (!direction) {
-        let reason = "شرایط ورود کامل نیست";
-
-        if (fast === null || slow === null || strength === null) {
-          reason = "اطلاعات کافی برای محاسبه اندیکاتورها وجود ندارد";
-        } else if (fast > slow && !(strength >= 50 && strength <= 68)) {
-          reason = "روند صعودی است، اما RSI باید بین ۵۰ تا ۶۸ باشد";
-        } else if (fast < slow && !(strength >= 32 && strength <= 50)) {
-          reason = "روند نزولی است، اما RSI باید بین ۳۲ تا ۵۰ باشد";
-        } else if (fast === slow) {
-          reason = "EMA20 و EMA50 برابر هستند";
-        }
-
         diagnostics.push({
-          ...diagnostic,
+          ...info,
           status: "NO_ENTRY",
-          reason
+          reason: "شرایط ورود کامل نیست"
         });
 
         continue;
@@ -454,8 +508,8 @@ export async function runBot() {
 
       let quantity = riskAmount / stopDistance;
 
-      // حداکثر ۱۸ درصد موجودی آزاد برای هر معامله
-      const maxNotional = balance * MAX_POSITION_PERCENT;
+      const maxNotional =
+        balance * MAX_POSITION_PERCENT;
 
       if (quantity * entry > maxNotional) {
         quantity = maxNotional / entry;
@@ -468,23 +522,12 @@ export async function runBot() {
       if (
         !Number.isFinite(quantity) ||
         quantity <= 0 ||
-        !Number.isFinite(totalCost)
+        totalCost > balance
       ) {
         diagnostics.push({
-          ...diagnostic,
-          status: "ERROR",
-          reason: "محاسبه مقدار معامله نامعتبر است"
-        });
-
-        continue;
-      }
-
-      if (totalCost > balance) {
-        diagnostics.push({
-          ...diagnostic,
+          ...info,
           status: "NO_BALANCE",
-          side: direction,
-          reason: "موجودی برای ورود به معامله کافی نیست"
+          reason: "موجودی برای ورود کافی نیست"
         });
 
         continue;
@@ -501,12 +544,18 @@ export async function runBot() {
       try {
         await client.query(`
           INSERT INTO radar_trades (
-            symbol, side, entry, quantity,
-            stop_loss, take_profit, leverage, status
+            symbol,
+            side,
+            entry,
+            quantity,
+            stop_loss,
+            take_profit,
+            leverage,
+            status
           )
           VALUES ($1, $2, $3, $4, $5, $6, 1, 'OPEN')
         `, [
-          item.symbol,
+          symbol,
           direction,
           entry,
           quantity,
@@ -516,10 +565,11 @@ export async function runBot() {
       } catch (error) {
         if (error.code === "23505") {
           diagnostics.push({
-            ...diagnostic,
+            ...info,
             status: "SKIPPED",
-            reason: "برای این ارز معامله باز دیگری ثبت شده است"
+            reason: "معامله باز دیگری برای این ارز وجود دارد"
           });
+
           continue;
         }
 
@@ -537,22 +587,21 @@ export async function runBot() {
       opened++;
 
       diagnostics.push({
-        ...diagnostic,
+        ...info,
         status: "OPENED",
         side: direction,
         quantity: Number(quantity.toFixed(8)),
         positionValue: Number(cost.toFixed(4)),
-        riskAmount: Number((quantity * stopDistance).toFixed(4)),
         stopLoss: Number(stop.toFixed(8)),
         takeProfit: Number(target.toFixed(8)),
-        reason: direction === "SHORT"
-          ? "معامله آزمایشی فروش باز شد"
-          : "معامله آزمایشی خرید باز شد"
+        reason: direction === "LONG"
+          ? "معامله آزمایشی LONG باز شد"
+          : "معامله آزمایشی SHORT باز شد"
       });
     }
 
     const nextCursor =
-      (cursor + Math.max(1, scanned)) % PAIRS.length;
+      (cursor + batch.length) % universe.length;
 
     await client.query(`
       UPDATE radar_account
@@ -563,6 +612,10 @@ export async function runBot() {
       nextCursor,
       JSON.stringify({
         updatedAt: new Date().toISOString(),
+        exchange: "Binance USD-M Futures",
+        universeCount: universe.length,
+        batchSize: batch.length,
+        nextCursor,
         scanned,
         opened,
         closed,
@@ -575,20 +628,20 @@ export async function runBot() {
     return {
       ok: true,
       mode: "PAPER_TRADING",
-      exchange: "Kraken Spot - simulated LONG/SHORT",
+      exchange: "Binance USD-M Futures",
+      market: "USDT Perpetual",
       interval: INTERVAL,
+      universeCount: universe.length,
+      batchSize: batch.length,
       scanned,
       opened,
       closed,
       openTrades: openCount,
-      availableBalance: Number(balance.toFixed(4)),
       maxOpenTrades: MAX_OPEN_TRADES,
-      maxPositionPercent: MAX_POSITION_PERCENT,
-      stopPercent: STOP_PERCENT,
-      targetPercent: STOP_PERCENT * TARGET_MULTIPLIER,
+      availableBalance: Number(balance.toFixed(4)),
       diagnostics,
-      trading: "LONG and SHORT - simulated only",
-      message: "Paper trading cycle completed"
+      trading: "Simulated LONG and SHORT only",
+      message: "Binance paper trading cycle completed"
     };
 
   } catch (error) {
@@ -604,32 +657,45 @@ export async function getStatus() {
 
   const [account, trades, counts] = await Promise.all([
     pool.query(`
-      SELECT * FROM radar_account WHERE id = 1
+      SELECT *
+      FROM radar_account
+      WHERE id = 1
     `),
 
     pool.query(`
-      SELECT * FROM radar_trades
+      SELECT *
+      FROM radar_trades
       ORDER BY opened_at DESC
       LIMIT 50
     `),
 
     pool.query(`
       SELECT
-        COUNT(*) FILTER (WHERE status = 'OPEN')::int AS open,
-        COUNT(*) FILTER (WHERE status = 'CLOSED')::int AS closed
+        COUNT(*) FILTER (
+          WHERE status = 'OPEN'
+        )::int AS open,
+        COUNT(*) FILTER (
+          WHERE status = 'CLOSED'
+        )::int AS closed
       FROM radar_trades
     `)
   ]);
 
+  const diagnostics = account.rows[0].diagnostics || {};
+
   return {
     ok: true,
     mode: "PAPER_TRADING",
-    exchange: "Kraken Spot - simulated LONG/SHORT",
+    exchange: "Binance USD-M Futures",
+    market: "USDT Perpetual",
     availableBalance: Number(account.rows[0].balance),
     openTrades: counts.rows[0].open,
     closedTrades: counts.rows[0].closed,
     maxOpenTrades: MAX_OPEN_TRADES,
+    universeCount: diagnostics.universeCount || 0,
+    lastScan: diagnostics.updatedAt || null,
+    scanResults: diagnostics.results || [],
     trades: trades.rows,
-    diagnostics: account.rows[0].diagnostics || []
+    diagnostics
   };
 }
