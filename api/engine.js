@@ -16,6 +16,9 @@ const RISK = 0.01;
 const INITIAL_BALANCE = 1000;
 const FEE_RATE = 0.001;
 const MAX_OPEN_TRADES = 5;
+const MAX_POSITION_PERCENT = 0.18;
+const STOP_PERCENT = 0.05;
+const TARGET_MULTIPLIER = 2;
 
 const PAIRS = [
   { symbol: "BTCUSDT", pair: "XBTUSDT" },
@@ -265,7 +268,7 @@ export async function runBot() {
     const diagnostics = [];
     const cursor = Number(account.scan_cursor || 0);
 
-    // بررسی معاملات باز و بستن در حد سود یا حد ضرر
+    // بررسی معاملات باز
     for (const trade of openResult.rows) {
       const item = PAIRS.find(p => p.symbol === trade.symbol);
       if (!item) continue;
@@ -298,7 +301,9 @@ export async function runBot() {
             side: trade.side,
             price,
             pnl: Number(result.pnl.toFixed(4)),
-            reason: hitStop ? "حد ضرر فعال شد" : "حد سود فعال شد"
+            reason: hitStop
+              ? "حد ضرر فعال شد"
+              : "حد سود فعال شد"
           });
         }
       } catch (error) {
@@ -444,12 +449,13 @@ export async function runBot() {
       }
 
       const entry = latest.close;
-      const stopDistance = entry * 0.01;
+      const stopDistance = entry * STOP_PERCENT;
       const riskAmount = balance * RISK;
 
       let quantity = riskAmount / stopDistance;
 
-      const maxNotional = balance * 0.9;
+      // حداکثر ۱۸ درصد موجودی آزاد برای هر معامله
+      const maxNotional = balance * MAX_POSITION_PERCENT;
 
       if (quantity * entry > maxNotional) {
         quantity = maxNotional / entry;
@@ -458,6 +464,20 @@ export async function runBot() {
       const cost = quantity * entry;
       const entryFee = cost * FEE_RATE;
       const totalCost = cost + entryFee;
+
+      if (
+        !Number.isFinite(quantity) ||
+        quantity <= 0 ||
+        !Number.isFinite(totalCost)
+      ) {
+        diagnostics.push({
+          ...diagnostic,
+          status: "ERROR",
+          reason: "محاسبه مقدار معامله نامعتبر است"
+        });
+
+        continue;
+      }
 
       if (totalCost > balance) {
         diagnostics.push({
@@ -470,23 +490,13 @@ export async function runBot() {
         continue;
       }
 
-      if (!Number.isFinite(quantity) || quantity <= 0) {
-        diagnostics.push({
-          ...diagnostic,
-          status: "ERROR",
-          reason: "محاسبه مقدار معامله نامعتبر است"
-        });
-
-        continue;
-      }
-
       const stop = direction === "SHORT"
         ? entry + stopDistance
         : entry - stopDistance;
 
       const target = direction === "SHORT"
-        ? entry - stopDistance * 2
-        : entry + stopDistance * 2;
+        ? entry - stopDistance * TARGET_MULTIPLIER
+        : entry + stopDistance * TARGET_MULTIPLIER;
 
       try {
         await client.query(`
@@ -531,6 +541,8 @@ export async function runBot() {
         status: "OPENED",
         side: direction,
         quantity: Number(quantity.toFixed(8)),
+        positionValue: Number(cost.toFixed(4)),
+        riskAmount: Number((quantity * stopDistance).toFixed(4)),
         stopLoss: Number(stop.toFixed(8)),
         takeProfit: Number(target.toFixed(8)),
         reason: direction === "SHORT"
@@ -570,9 +582,13 @@ export async function runBot() {
       closed,
       openTrades: openCount,
       availableBalance: Number(balance.toFixed(4)),
+      maxOpenTrades: MAX_OPEN_TRADES,
+      maxPositionPercent: MAX_POSITION_PERCENT,
+      stopPercent: STOP_PERCENT,
+      targetPercent: STOP_PERCENT * TARGET_MULTIPLIER,
       diagnostics,
       trading: "LONG and SHORT - simulated only",
-      message: "Paper trading diagnostic cycle completed"
+      message: "Paper trading cycle completed"
     };
 
   } catch (error) {
@@ -612,6 +628,7 @@ export async function getStatus() {
     availableBalance: Number(account.rows[0].balance),
     openTrades: counts.rows[0].open,
     closedTrades: counts.rows[0].closed,
+    maxOpenTrades: MAX_OPEN_TRADES,
     trades: trades.rows,
     diagnostics: account.rows[0].diagnostics || []
   };
