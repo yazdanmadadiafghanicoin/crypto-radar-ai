@@ -4,75 +4,116 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Crypto Radar AI</title>
+<title>Crypto Radar AI Pro</title>
 <style>
 *{box-sizing:border-box}
-body{margin:0;background:#0b1120;color:#e5edf8;font:15px Tahoma,Arial}
-header,main{padding:16px}
-header{background:#111c30}
-main{max-width:1100px;margin:auto}
-.panel,.stat{background:#111c30;border:1px solid #29364d;border-radius:12px;padding:14px;margin:12px 0}
-.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-.stat strong{display:block;font-size:20px;margin-top:8px}
-.muted{color:#9aabc3;line-height:1.8}
+body{margin:0;background:#09111f;color:#e6edf8;font:14px Tahoma,Arial}
+header{padding:20px;background:#111e32;border-bottom:1px solid #293b55}
+header h1{margin:0 0 8px;font-size:23px}
+main{max-width:1200px;margin:auto;padding:14px}
+.panel,.stat{background:#111e32;border:1px solid #293b55;border-radius:13px;padding:14px;margin:12px 0}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
+.stat{margin:0;color:#9eb0c8}
+.stat strong{display:block;color:#fff;font-size:20px;margin-top:9px;overflow-wrap:anywhere}
+h2{font-size:17px;margin:5px 0 14px}
+h3{font-size:15px}
+.muted{color:#9eb0c8;line-height:1.9}
 .controls{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
-button,input,select{background:#1b2a42;color:white;border:1px solid #3b4e6c;border-radius:8px;padding:11px;font:inherit}
+button,input,select{background:#1b2b44;color:white;border:1px solid #3b5273;border-radius:8px;padding:11px;font:inherit}
+button{cursor:pointer}
 .tablewrap{overflow-x:auto}
-table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:13px}
-td,th{text-align:right;padding:11px;border-bottom:1px solid #29364d}
-th{color:#9aabc3}
-.good{color:#62e6ac}.bad{color:#ff9b9b}
-.pill{padding:5px 8px;border-radius:7px}
-.up{background:#123b30;color:#62e6ac}
-.down{background:#48242e;color:#ff9b9b}
-.flat{background:#493d20;color:#f5d78c}
-@media(max-width:520px){.stats{grid-template-columns:1fr 1fr}}
+table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:12px}
+td,th{text-align:right;padding:11px;border-bottom:1px solid #293b55}
+th{color:#9eb0c8}
+.good{color:#55e5a6}
+.bad{color:#ff8888}
+.gold{color:#f4ce72}
+.pill{padding:5px 8px;border-radius:7px;display:inline-block}
+.up{background:#123c30;color:#62e6ac}
+.down{background:#48232e;color:#ff9999}
+.flat{background:#493e20;color:#f5d78c}
+.cardgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+.tradecard{background:#0c1728;border:1px solid #31435d;border-radius:12px;padding:13px;min-width:0}
+.tradehead{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.tradehead b{font-size:16px}
+.metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-top:12px}
+.metric{background:#142238;padding:9px;border-radius:8px;min-width:0}
+.metric small{display:block;color:#9eb0c8;margin-bottom:6px}
+.metric strong{overflow-wrap:anywhere}
+.bar{height:7px;background:#293b55;border-radius:10px;overflow:hidden;margin-top:10px}
+.bar span{display:block;height:100%;background:#4bca9a}
+.statusline{margin-top:10px;line-height:1.9}
+@media(max-width:650px){
+ .stats{grid-template-columns:repeat(2,1fr)}
+ .cardgrid{grid-template-columns:1fr}
+ header h1{font-size:20px}
+}
 </style>
 </head>
 <body>
 <header>
-<h1>📡 Crypto Radar AI</h1>
-<div class="muted">OKX USDT Perpetual · روند بازار · معاملات آزمایشی</div>
+<h1>📡 Crypto Radar AI PRO</h1>
+<div class="muted">OKX USDT Perpetual · مدیریت هوشمند معاملات · Paper Trading</div>
 </header>
+
 <main>
-<div class="panel muted">
-ربات در حالت آزمایشی است. روند بازار بر اساس تغییر قیمت ۲۴ ساعت اخیر است؛ این روند به معنی سیگنال قطعی خرید یا فروش نیست.
+<div class="panel">
+ <b class="good">● سیستم آزمایشی فعال است</b>
+ <div class="muted">
+ این داشبورد سفارش واقعی ثبت نمی‌کند. سود و زیان نمایش‌داده‌شده تخمینی است و بر اساس آخرین قیمت دریافتی محاسبه می‌شود.
+ </div>
 </div>
 
 <div class="stats">
-<div class="stat">قراردادهای بازار<strong id="universe">—</strong></div>
-<div class="stat">معاملات باز<strong id="openCount">—</strong></div>
-<div class="stat">معاملات بسته<strong id="closedCount">—</strong></div>
-<div class="stat">موجودی مجازی<strong id="balance">—</strong></div>
-<div class="stat">ارزهای صعودی<strong id="upCount">—</strong></div>
-<div class="stat">ارزهای نزولی<strong id="downCount">—</strong></div>
+ <div class="stat">موجودی آزاد مجازی<strong id="balance">—</strong></div>
+ <div class="stat">معاملات باز<strong id="openCount">—</strong></div>
+ <div class="stat">معاملات بسته<strong id="closedCount">—</strong></div>
+ <div class="stat">قراردادهای بازار<strong id="universe">—</strong></div>
+ <div class="stat">سود/زیان تخمینی باز<strong id="totalPnl">—</strong></div>
+ <div class="stat">آخرین بروزرسانی<strong id="lastUpdate">—</strong></div>
 </div>
 
 <div class="controls">
-<button onclick="loadStatus()">🔄 تازه‌سازی ربات</button>
-<button onclick="loadTrends()">📈 تازه‌سازی بازار</button>
+ <button onclick="loadStatus()">🔄 تازه‌سازی معاملات</button>
+ <button onclick="loadTrends()">📈 تازه‌سازی بازار</button>
 </div>
-<p id="status" class="muted">در حال اتصال…</p>
+
+<p id="status" class="muted">در حال اتصال به ربات…</p>
 
 <section class="panel">
-<h2>📒 معاملات مجازی باز</h2>
+<h2>🧠 مدیریت هوشمند معاملات باز</h2>
+<p class="muted">قیمت، حد ضرر فعال، حد سود، سر‌به‌سر و حد ضرر متحرک هر معامله را بررسی کن.</p>
+<div id="tradeCards" class="cardgrid">
+ <div class="muted">در حال بارگذاری معاملات…</div>
+</div>
+</section>
+
+<section class="panel">
+<h2>📒 تاریخچه معاملات</h2>
 <div class="tablewrap">
 <table>
-<thead><tr><th>ارز</th><th>جهت</th><th>ورود</th><th>حجم</th><th>حد ضرر</th><th>حد سود</th><th>وضعیت</th></tr></thead>
-<tbody id="trades"><tr><td colspan="7">در حال بارگذاری…</td></tr></tbody>
+<thead>
+<tr>
+<th>ارز</th><th>جهت</th><th>ورود</th><th>حجم</th>
+<th>سود/زیان نهایی</th><th>وضعیت</th><th>تاریخ</th>
+</tr>
+</thead>
+<tbody id="history">
+<tr><td colspan="7">در حال بارگذاری…</td></tr>
+</tbody>
 </table>
 </div>
 </section>
 
 <section class="panel">
 <h2>🌐 تمام ارزهای OKX</h2>
-<p id="marketInfo" class="muted">در حال دریافت فهرست بازار…</p>
+<p id="marketInfo" class="muted">در حال دریافت بازار…</p>
 <div class="controls">
 <input id="search" placeholder="جستجوی ارز…" oninput="renderCoins()">
 <select id="direction" onchange="renderCoins()">
 <option value="ALL">همه روندها</option>
-<option value="UP">فقط صعودی</option>
-<option value="DOWN">فقط نزولی</option>
+<option value="UP">صعودی</option>
+<option value="DOWN">نزولی</option>
 <option value="SIDEWAYS">خنثی</option>
 </select>
 <select id="sort" onchange="renderCoins()">
@@ -83,19 +124,23 @@ th{color:#9aabc3}
 </div>
 <div class="tablewrap">
 <table>
-<thead><tr><th>ردیف</th><th>ارز</th><th>قیمت فعلی</th><th>تغییر ۲۴ ساعت</th><th>روند</th></tr></thead>
+<thead>
+<tr><th>ردیف</th><th>ارز</th><th>قیمت</th><th>تغییر ۲۴ ساعت</th><th>روند</th></tr>
+</thead>
 <tbody id="coins"><tr><td colspan="5">در حال دریافت…</td></tr></tbody>
 </table>
 </div>
 </section>
 
 <section class="panel">
-<h2>📡 آخرین نتایج بررسی ربات</h2>
+<h2>📡 آخرین نتایج اسکن ربات</h2>
 <p id="scanInfo" class="muted">—</p>
 <div class="tablewrap">
 <table>
-<thead><tr><th>ارز</th><th>قیمت</th><th>RSI</th><th>جهت</th><th>نتیجه</th></tr></thead>
-<tbody id="scanRows"><tr><td colspan="5">—</td></tr></tbody>
+<thead>
+<tr><th>ارز</th><th>قیمت</th><th>RSI</th><th>جهت</th><th>وضعیت</th><th>توضیح</th></tr>
+</thead>
+<tbody id="scanRows"><tr><td colspan="6">—</td></tr></tbody>
 </table>
 </div>
 </section>
@@ -104,46 +149,158 @@ th{color:#9aabc3}
 <script>
 const API="https://crypto-radar-ai-mocha.vercel.app/api";
 const TRENDS=API+"/trends";
+const FEE=0.0005;
 const $=id=>document.getElementById(id);
-const fmt=n=>n==null||!Number.isFinite(Number(n))?"—":Number(n).toLocaleString("en-US",{maximumFractionDigits:8});
+
+const fmt=n=>{
+ if(n===null||n===undefined||!Number.isFinite(Number(n)))return "—";
+ return Number(n).toLocaleString("en-US",{maximumFractionDigits:8});
+};
+
+const money=n=>fmt(n)+" USDT";
 const dateFmt=d=>d?new Date(d).toLocaleString("fa-IR"):"—";
+
 let allCoins=[];
+let latestStatus=null;
 
 async function getJson(url){
  const r=await fetch(url+"?t="+Date.now(),{cache:"no-store"});
  const txt=await r.text();
  let d;
- try{d=JSON.parse(txt)}catch(e){throw Error("پاسخ سرور JSON نیست؛ انتشار Vercel را بررسی کن.")}
+ try{d=JSON.parse(txt)}catch(e){
+  throw Error("پاسخ سرور JSON نیست؛ Deploy را بررسی کن.");
+ }
  if(!r.ok||d.ok===false)throw Error(d.error||"خطای سرور");
  return d;
+}
+
+function estimatedPnl(t,price){
+ if(!Number.isFinite(Number(price)))return null;
+ const entry=Number(t.entry);
+ const qty=Number(t.quantity);
+ const gross=t.side==="SHORT"
+  ?(entry-price)*qty
+  :(price-entry)*qty;
+ const fees=(entry+price)*qty*FEE;
+ return gross-fees;
+}
+
+function renderTradeCards(d){
+ const open=(d.trades||[]).filter(t=>t.status==="OPEN");
+ const scans=d.scanResults||[];
+
+ if(!open.length){
+  $("tradeCards").innerHTML='<p class="muted">معامله بازی وجود ندارد.</p>';
+  $("totalPnl").textContent="0 USDT";
+  return;
+ }
+
+ let total=0;
+ let known=0;
+
+ $("tradeCards").innerHTML=open.map(t=>{
+  const scan=scans.find(x=>x.symbol===t.symbol&&x.status==="MANAGING");
+  const price=scan?Number(scan.price):null;
+  const pnl=estimatedPnl(t,price);
+  if(pnl!==null){total+=pnl;known++;}
+
+  const isShort=t.side==="SHORT";
+  const be=t.break_even_active===true;
+  const trailing=t.trailing_stop!==null&&t.trailing_stop!==undefined;
+  const favorable=scan&&Number.isFinite(Number(scan.favorableMove))
+   ?Number(scan.favorableMove):null;
+
+  let state="در حال مدیریت";
+  let stateClass="flat";
+
+  if(trailing){state="Trailing Stop فعال";stateClass="up";}
+  else if(be){state="سر‌به‌سر فعال";stateClass="up";}
+
+  const pnlClass=pnl===null?"":pnl>=0?"good":"bad";
+  const progress=favorable===null?0:Math.max(0,Math.min(100,favorable/10*100));
+
+  return `
+  <article class="tradecard">
+   <div class="tradehead">
+    <b>${t.symbol}</b>
+    <span class="pill ${isShort?"down":"up"}">${isShort?"SHORT / فروش":"LONG / خرید"}</span>
+   </div>
+
+   <div class="statusline">
+    <span class="pill ${stateClass}">${state}</span>
+    <span class="muted"> · شناسه ${t.id}</span>
+   </div>
+
+   <div class="metrics">
+    <div class="metric"><small>قیمت ورود</small><strong>${fmt(t.entry)}</strong></div>
+    <div class="metric"><small>قیمت فعلی</small><strong>${fmt(price)}</strong></div>
+    <div class="metric"><small>سود/زیان تخمینی پس از کارمزد</small><strong class="${pnlClass}">${pnl===null?"قیمت موجود نیست":money(pnl)}</strong></div>
+    <div class="metric"><small>حجم معامله</small><strong>${fmt(t.quantity)}</strong></div>
+    <div class="metric"><small>حد ضرر فعال</small><strong class="bad">${fmt(t.stop_loss)}</strong></div>
+    <div class="metric"><small>حد سود</small><strong class="good">${fmt(t.take_profit)}</strong></div>
+    <div class="metric"><small>بالاترین قیمت</small><strong>${fmt(t.highest_price)}</strong></div>
+    <div class="metric"><small>پایین‌ترین قیمت</small><strong>${fmt(t.lowest_price)}</strong></div>
+    <div class="metric"><small>حد ضرر متحرک</small><strong>${fmt(t.trailing_stop)}</strong></div>
+    <div class="metric"><small>سر‌به‌سر</small><strong class="${be?"good":"gold"}">${be?"فعال":"هنوز فعال نشده"}</strong></div>
+   </div>
+
+   <div class="muted" style="margin-top:12px">
+    حرکت قیمت در جهت سود: ${favorable===null?"—":fmt(favorable)+"٪"}
+   </div>
+   <div class="bar"><span style="width:${progress}%"></span></div>
+   <div class="muted">زمان ورود: ${dateFmt(t.opened_at)}</div>
+  </article>`;
+ }).join("");
+
+ $("totalPnl").textContent=known?money(total):"قیمت موجود نیست";
+ $("totalPnl").className=known?(total>=0?"good":"bad"):"";
+}
+
+function renderHistory(d){
+ const trades=d.trades||[];
+ $("history").innerHTML=trades.map(t=>`
+ <tr>
+  <td><b>${t.symbol}</b></td>
+  <td>${t.side}</td>
+  <td>${fmt(t.entry)}</td>
+  <td>${fmt(t.quantity)}</td>
+  <td class="${Number(t.pnl)>=0?"good":"bad"}">${t.status==="CLOSED"?money(t.pnl):"باز"}</td>
+  <td>${t.status==="OPEN"?"باز":t.status==="CLOSED"?"بسته":"—"}</td>
+  <td>${dateFmt(t.opened_at)}</td>
+ </tr>
+ `).join("")||'<tr><td colspan="7">تاریخی وجود ندارد.</td></tr>';
 }
 
 async function loadStatus(){
  try{
   const d=await getJson(API);
-  $("universe").textContent=fmt(d.universeCount);
-  $("openCount").textContent=fmt(d.openTrades);
-  $("closedCount").textContent=fmt(d.closedTrades);
-  $("balance").textContent=fmt(d.availableBalance)+" USDT";
+  latestStatus=d;
 
-  $("trades").innerHTML=(d.trades||[]).map(t=>`
-  <tr>
-  <td><b>${t.symbol}</b></td>
-  <td><span class="pill ${t.side==="SHORT"?"down":"up"}">${t.side==="SHORT"?"شورت":"لانگ"}</span></td>
-  <td>${fmt(t.entry)}</td>
-  <td>${fmt(t.quantity)}</td>
-  <td>${fmt(t.stop_loss)}</td>
-  <td>${fmt(t.take_profit)}</td>
-  <td>${t.status==="OPEN"?"باز":t.status}</td>
-  </tr>`).join("")||'<tr><td colspan="7">معامله بازی وجود ندارد.</td></tr>';
+  $("universe").textContent=fmt(d.universeCount);
+  $("openCount").textContent=fmt(d.openTrades)+" / "+fmt(d.maxOpenTrades);
+  $("closedCount").textContent=fmt(d.closedTrades);
+  $("balance").textContent=money(d.availableBalance);
+  $("lastUpdate").textContent=dateFmt(d.lastScan);
+
+  renderTradeCards(d);
+  renderHistory(d);
 
   $("scanRows").innerHTML=(d.scanResults||[]).map(x=>`
-  <tr><td>${x.symbol}</td><td>${fmt(x.price)}</td>
-  <td>${fmt(x.rsi)}</td><td>${x.side||"—"}</td>
-  <td>${x.reason||x.status||"—"}</td></tr>`).join("")||'<tr><td colspan="5">نتیجه‌ای نیست.</td></tr>';
+   <tr>
+    <td>${x.symbol||"—"}</td>
+    <td>${fmt(x.price)}</td>
+    <td>${fmt(x.rsi)}</td>
+    <td>${x.side||"—"}</td>
+    <td>${x.status||"—"}</td>
+    <td>${x.reason||"—"}</td>
+   </tr>
+  `).join("")||'<tr><td colspan="6">نتیجه‌ای نیست.</td></tr>';
 
-  $("scanInfo").textContent="صرافی: "+d.exchange+" · آخرین اسکن: "+dateFmt(d.lastScan);
+  $("scanInfo").textContent=
+   "صرافی: "+d.exchange+" · آخرین اسکن: "+dateFmt(d.lastScan);
+
   $("status").innerHTML='<span class="good">اتصال ربات موفق است.</span>';
+
  }catch(e){
   $("status").innerHTML='<span class="bad">خطا: '+e.message.replace(/[<>]/g,"")+'</span>';
  }
@@ -153,39 +310,51 @@ function renderCoins(){
  const q=$("search").value.trim().toUpperCase();
  const dir=$("direction").value;
  const sort=$("sort").value;
+
  let list=allCoins.filter(c=>
-  (!q||c.symbol.includes(q))&&(dir==="ALL"||c.direction===dir)
+  (!q||c.symbol.includes(q))&&
+  (dir==="ALL"||c.direction===dir)
  );
+
  if(sort==="changeDesc")list.sort((a,b)=>b.change24h-a.change24h);
  if(sort==="changeAsc")list.sort((a,b)=>a.change24h-b.change24h);
  if(sort==="symbol")list.sort((a,b)=>a.symbol.localeCompare(b.symbol));
 
  $("coins").innerHTML=list.map((c,i)=>`
- <tr>
- <td>${i+1}</td><td><b>${c.symbol}</b></td>
- <td>${fmt(c.price)}</td>
- <td class="${c.change24h>0?"good":c.change24h<0?"bad":""}">${c.change24h>0?"+":""}${fmt(c.change24h)}%</td>
- <td><span class="pill ${c.direction==="UP"?"up":c.direction==="DOWN"?"down":"flat"}">${c.direction==="UP"?"صعودی":c.direction==="DOWN"?"نزولی":"خنثی"}</span></td>
- </tr>`).join("")||'<tr><td colspan="5">ارزی پیدا نشد.</td></tr>';
+  <tr>
+   <td>${i+1}</td>
+   <td><b>${c.symbol}</b></td>
+   <td>${fmt(c.price)}</td>
+   <td class="${c.change24h>0?"good":c.change24h<0?"bad":""}">
+    ${c.change24h>0?"+":""}${fmt(c.change24h)}%
+   </td>
+   <td>
+    <span class="pill ${c.direction==="UP"?"up":c.direction==="DOWN"?"down":"flat"}">
+     ${c.direction==="UP"?"صعودی":c.direction==="DOWN"?"نزولی":"خنثی"}
+    </span>
+   </td>
+  </tr>
+ `).join("")||'<tr><td colspan="5">ارزی پیدا نشد.</td></tr>';
 }
 
 async function loadTrends(){
- $("marketInfo").textContent="در حال دریافت همه قراردادهای فعال…";
+ $("marketInfo").textContent="در حال دریافت بازار…";
  try{
   const d=await getJson(TRENDS);
   allCoins=d.coins||[];
-  $("upCount").textContent=fmt(allCoins.filter(c=>c.direction==="UP").length);
-  $("downCount").textContent=fmt(allCoins.filter(c=>c.direction==="DOWN").length);
-  $("marketInfo").textContent="تعداد قراردادها: "+d.count+" · صرافی: "+d.exchange+" · تغییر قیمت: ۲۴ ساعت";
+
+  $("marketInfo").textContent=
+   "تعداد قراردادها: "+d.count+" · صرافی: "+d.exchange+" · تغییر قیمت ۲۴ ساعت";
+
   renderCoins();
  }catch(e){
-  $("marketInfo").innerHTML='<span class="bad">خطا: '+e.message.replace(/[<>]/g,"")+'</span>';
-  $("coins").innerHTML='<tr><td colspan="5">دریافت فهرست ناموفق بود.</td></tr>';
+  $("marketInfo").textContent="خطا: "+e.message;
  }
 }
 
 loadStatus();
 loadTrends();
+
 setInterval(loadStatus,30000);
 setInterval(loadTrends,60000);
 </script>
