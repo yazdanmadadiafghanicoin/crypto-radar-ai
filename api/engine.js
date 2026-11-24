@@ -31,10 +31,15 @@ async function kraken(path) {
     { signal: AbortSignal.timeout(15000) }
   );
 
-  if (!response.ok) throw new Error("Kraken HTTP " + response.status);
+  if (!response.ok) {
+    throw new Error("Kraken HTTP " + response.status);
+  }
 
   const data = await response.json();
-  if (data.error?.length) throw new Error(data.error.join(", "));
+
+  if (data.error?.length) {
+    throw new Error(data.error.join(", "));
+  }
 
   return data.result;
 }
@@ -56,6 +61,12 @@ async function setup() {
   await pool.query(`
     ALTER TABLE radar_account
     ADD COLUMN IF NOT EXISTS scan_cursor INTEGER NOT NULL DEFAULT 0
+  `);
+
+  await pool.query(`
+    ALTER TABLE radar_account
+    ADD COLUMN IF NOT EXISTS diagnostics JSONB
+    NOT NULL DEFAULT '[]'::jsonb
   `);
 
   await pool.query(`
@@ -220,7 +231,7 @@ async function closeTrade(client, trade, price) {
     WHERE id = 1
   `, [returnedCapital]);
 
-  return returnedCapital;
+  return { returnedCapital, pnl };
 }
 
 export async function runBot() {
@@ -248,13 +259,20 @@ export async function runBot() {
 
     let openCount = openResult.rowCount;
     let closed = 0;
+    let opened = 0;
+    let scanned = 0;
 
+    const diagnostics = [];
+    const cursor = Number(account.scan_cursor || 0);
+
+    // بررسی معاملات باز و بستن در حد سود یا حد ضرر
     for (const trade of openResult.rows) {
       const item = PAIRS.find(p => p.symbol === trade.symbol);
       if (!item) continue;
 
       try {
         const price = await getPrice(item.pair);
+
         if (!Number.isFinite(price) || price <= 0) continue;
 
         const isShort = trade.side === "SHORT";
@@ -268,22 +286,47 @@ export async function runBot() {
           : price >= Number(trade.take_profit);
 
         if (hitStop || hitTarget) {
-          const returned = await closeTrade(client, trade, price);
-          balance += returned;
+          const result = await closeTrade(client, trade, price);
+
+          balance += result.returnedCapital;
           openCount--;
           closed++;
+
+          diagnostics.push({
+            symbol: trade.symbol,
+            status: "CLOSED",
+            side: trade.side,
+            price,
+            pnl: Number(result.pnl.toFixed(4)),
+            reason: hitStop ? "حد ضرر فعال شد" : "حد سود فعال شد"
+          });
         }
       } catch (error) {
-        console.error("Close check failed:", trade.symbol, error.message);
+        diagnostics.push({
+          symbol: trade.symbol,
+          status: "ERROR",
+          reason: "خطا در بررسی معامله: " + error.message
+        });
       }
     }
 
-    let opened = 0;
-    let scanned = 0;
-    const cursor = Number(account.scan_cursor || 0);
-
+    // بررسی ارزها برای ورود جدید
     for (let i = 0; i < PAIRS.length; i++) {
-      if (openCount >= MAX_OPEN_TRADES || balance <= 10) break;
+      if (openCount >= MAX_OPEN_TRADES) {
+        diagnostics.push({
+          status: "LIMIT",
+          reason: "حداکثر تعداد معاملات همزمان تکمیل شده است"
+        });
+        break;
+      }
+
+      if (balance <= 10) {
+        diagnostics.push({
+          status: "NO_BALANCE",
+          reason: "موجودی مجازی کافی نیست"
+        });
+        break;
+      }
 
       const item = PAIRS[(cursor + i) % PAIRS.length];
 
@@ -294,6 +337,12 @@ export async function runBot() {
       `, [item.symbol]);
 
       if (existing.rowCount) {
+        diagnostics.push({
+          symbol: item.symbol,
+          status: "SKIPPED",
+          reason: "برای این ارز از قبل معامله باز وجود دارد"
+        });
+
         scanned++;
         continue;
       }
@@ -303,12 +352,24 @@ export async function runBot() {
       try {
         data = await candles(item.pair);
       } catch (error) {
-        console.error("Candle error:", item.symbol, error.message);
+        diagnostics.push({
+          symbol: item.symbol,
+          status: "ERROR",
+          reason: "خطای دریافت کندل: " + error.message
+        });
+
         scanned++;
         continue;
       }
 
       if (data.length < 55) {
+        diagnostics.push({
+          symbol: item.symbol,
+          status: "WAIT",
+          candles: data.length,
+          reason: "حداقل ۵۵ کندل برای تحلیل لازم است"
+        });
+
         scanned++;
         continue;
       }
@@ -326,6 +387,13 @@ export async function runBot() {
         : 0;
 
       if (latest.time <= previousTime) {
+        diagnostics.push({
+          symbol: item.symbol,
+          status: "WAIT",
+          candleTime: new Date(latest.time).toISOString(),
+          reason: "این کندل قبلاً بررسی شده؛ منتظر کندل جدید هستیم"
+        });
+
         scanned++;
         continue;
       }
@@ -339,8 +407,41 @@ export async function runBot() {
 
       scanned++;
 
+      const fast = ema(closes, 20);
+      const slow = ema(closes, 50);
+      const strength = rsi(closes);
       const direction = signal(closes);
-      if (!direction) continue;
+
+      const diagnostic = {
+        symbol: item.symbol,
+        candleTime: new Date(latest.time).toISOString(),
+        price: latest.close,
+        ema20: fast,
+        ema50: slow,
+        rsi: strength
+      };
+
+      if (!direction) {
+        let reason = "شرایط ورود کامل نیست";
+
+        if (fast === null || slow === null || strength === null) {
+          reason = "اطلاعات کافی برای محاسبه اندیکاتورها وجود ندارد";
+        } else if (fast > slow && !(strength >= 50 && strength <= 68)) {
+          reason = "روند صعودی است، اما RSI باید بین ۵۰ تا ۶۸ باشد";
+        } else if (fast < slow && !(strength >= 32 && strength <= 50)) {
+          reason = "روند نزولی است، اما RSI باید بین ۳۲ تا ۵۰ باشد";
+        } else if (fast === slow) {
+          reason = "EMA20 و EMA50 برابر هستند";
+        }
+
+        diagnostics.push({
+          ...diagnostic,
+          status: "NO_ENTRY",
+          reason
+        });
+
+        continue;
+      }
 
       const entry = latest.close;
       const stopDistance = entry * 0.01;
@@ -358,8 +459,26 @@ export async function runBot() {
       const entryFee = cost * FEE_RATE;
       const totalCost = cost + entryFee;
 
-      if (totalCost > balance) continue;
-      if (!Number.isFinite(quantity) || quantity <= 0) continue;
+      if (totalCost > balance) {
+        diagnostics.push({
+          ...diagnostic,
+          status: "NO_BALANCE",
+          side: direction,
+          reason: "موجودی برای ورود به معامله کافی نیست"
+        });
+
+        continue;
+      }
+
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        diagnostics.push({
+          ...diagnostic,
+          status: "ERROR",
+          reason: "محاسبه مقدار معامله نامعتبر است"
+        });
+
+        continue;
+      }
 
       const stop = direction === "SHORT"
         ? entry + stopDistance
@@ -369,20 +488,33 @@ export async function runBot() {
         ? entry - stopDistance * 2
         : entry + stopDistance * 2;
 
-      await client.query(`
-        INSERT INTO radar_trades (
-          symbol, side, entry, quantity,
-          stop_loss, take_profit, leverage, status
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, 1, 'OPEN')
-      `, [
-        item.symbol,
-        direction,
-        entry,
-        quantity,
-        stop,
-        target
-      ]);
+      try {
+        await client.query(`
+          INSERT INTO radar_trades (
+            symbol, side, entry, quantity,
+            stop_loss, take_profit, leverage, status
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, 1, 'OPEN')
+        `, [
+          item.symbol,
+          direction,
+          entry,
+          quantity,
+          stop,
+          target
+        ]);
+      } catch (error) {
+        if (error.code === "23505") {
+          diagnostics.push({
+            ...diagnostic,
+            status: "SKIPPED",
+            reason: "برای این ارز معامله باز دیگری ثبت شده است"
+          });
+          continue;
+        }
+
+        throw error;
+      }
 
       await client.query(`
         UPDATE radar_account
@@ -393,6 +525,18 @@ export async function runBot() {
       balance -= totalCost;
       openCount++;
       opened++;
+
+      diagnostics.push({
+        ...diagnostic,
+        status: "OPENED",
+        side: direction,
+        quantity: Number(quantity.toFixed(8)),
+        stopLoss: Number(stop.toFixed(8)),
+        takeProfit: Number(target.toFixed(8)),
+        reason: direction === "SHORT"
+          ? "معامله آزمایشی فروش باز شد"
+          : "معامله آزمایشی خرید باز شد"
+      });
     }
 
     const nextCursor =
@@ -400,9 +544,19 @@ export async function runBot() {
 
     await client.query(`
       UPDATE radar_account
-      SET scan_cursor = $1
+      SET scan_cursor = $1,
+          diagnostics = $2::jsonb
       WHERE id = 1
-    `, [nextCursor]);
+    `, [
+      nextCursor,
+      JSON.stringify({
+        updatedAt: new Date().toISOString(),
+        scanned,
+        opened,
+        closed,
+        results: diagnostics
+      })
+    ]);
 
     await client.query("COMMIT");
 
@@ -411,16 +565,14 @@ export async function runBot() {
       mode: "PAPER_TRADING",
       exchange: "Kraken Spot - simulated LONG/SHORT",
       interval: INTERVAL,
-      eligibleSymbols: PAIRS.length,
       scanned,
       opened,
       closed,
       openTrades: openCount,
       availableBalance: Number(balance.toFixed(4)),
-      riskPerTrade: "1%",
-      leverage: 1,
+      diagnostics,
       trading: "LONG and SHORT - simulated only",
-      message: "Paper trading cycle completed"
+      message: "Paper trading diagnostic cycle completed"
     };
 
   } catch (error) {
@@ -435,12 +587,16 @@ export async function getStatus() {
   await setup();
 
   const [account, trades, counts] = await Promise.all([
-    pool.query(`SELECT * FROM radar_account WHERE id = 1`),
+    pool.query(`
+      SELECT * FROM radar_account WHERE id = 1
+    `),
+
     pool.query(`
       SELECT * FROM radar_trades
       ORDER BY opened_at DESC
       LIMIT 50
     `),
+
     pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE status = 'OPEN')::int AS open,
@@ -456,6 +612,7 @@ export async function getStatus() {
     availableBalance: Number(account.rows[0].balance),
     openTrades: counts.rows[0].open,
     closedTrades: counts.rows[0].closed,
-    trades: trades.rows
+    trades: trades.rows,
+    diagnostics: account.rows[0].diagnostics || []
   };
 }
